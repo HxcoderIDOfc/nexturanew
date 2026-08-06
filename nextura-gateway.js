@@ -6,6 +6,7 @@ const PUBLIC_PORT = Number(process.env.PORT || 8000);
 const HOST = process.env.HOST || "0.0.0.0";
 const INTERNAL_PORT = Number(process.env.GATEWAY_INTERNAL_PORT || (PUBLIC_PORT === 8000 ? 8002 : PUBLIC_PORT + 2));
 const ROUTER_PORT = Number(process.env.ROUTER_INTERNAL_PORT || INTERNAL_PORT + 1);
+const TOOL_PORT = Number(process.env.TOOL_INTERNAL_PORT || ROUTER_PORT + 1);
 
 const AI_NAME = process.env.NEXTURA_AI_NAME || "Nextura AI";
 const MODEL_FAMILY = process.env.NEXTURA_MODEL_FAMILY || "Nextura Cortexa";
@@ -16,7 +17,7 @@ const PRO_MODEL_NAME = process.env.NEXTURA_PRO_MODEL_NAME || "Nextura Cortexa Pr
 const MAX_MODEL_ID = process.env.NEXTURA_MAX_MODEL_ID || "Nextura/cortexa-max";
 const MAX_MODEL_NAME = process.env.NEXTURA_MAX_MODEL_NAME || "Nextura Cortexa Max";
 
-const child = spawn(process.execPath, ["koyeb.js"], {
+const routerChild = spawn(process.execPath, ["koyeb.js"], {
   env: {
     ...process.env,
     PORT: String(INTERNAL_PORT),
@@ -26,14 +27,23 @@ const child = spawn(process.execPath, ["koyeb.js"], {
   stdio: "inherit"
 });
 
-child.on("exit", (code, signal) => {
-  console.error(`[nextura-json] Router berhenti. code=${code} signal=${signal}`);
-  process.exit(code ?? 1);
+const toolChild = spawn(process.execPath, ["terminal-tool.js"], {
+  env: {
+    ...process.env,
+    TOOL_INTERNAL_PORT: String(TOOL_PORT)
+  },
+  stdio: "inherit"
 });
 
+for (const [name, child] of [["router", routerChild], ["tool", toolChild]]) {
+  child.on("exit", (code, signal) => {
+    console.error(`[nextura-json] ${name} berhenti. code=${code} signal=${signal}`);
+    process.exit(code ?? 1);
+  });
+}
+
 function modelName(id) {
-  if (id === MAX_MODEL_ID) return MAX_MODEL_NAME;
-  return PRO_MODEL_NAME;
+  return id === MAX_MODEL_ID ? MAX_MODEL_NAME : PRO_MODEL_NAME;
 }
 
 function nexturaId() {
@@ -54,7 +64,6 @@ function toNexturaJson(data = {}) {
   const publicModel = data.model || PRO_MODEL_ID;
   const choice = data?.choices?.[0] || {};
   const sourceMeta = data.nextura || data.x_nextura || {};
-
   return {
     id: String(data.id || nexturaId()).replace(/^devshard-/i, "nextura-"),
     object: "chat.completion",
@@ -62,10 +71,7 @@ function toNexturaJson(data = {}) {
     model: publicModel,
     choices: [{
       index: 0,
-      message: {
-        role: "assistant",
-        content: choice?.message?.content || ""
-      },
+      message: { role: "assistant", content: choice?.message?.content || "" },
       finish_reason: choice.finish_reason || "stop"
     }],
     usage: normalizeUsage(data.usage),
@@ -86,25 +92,36 @@ function toNexturaJson(data = {}) {
   };
 }
 
-function proxy(req, res) {
+function proxyRaw(req, res, port) {
+  const upstream = http.request({
+    hostname: "127.0.0.1",
+    port,
+    path: req.url,
+    method: req.method,
+    headers: { ...req.headers, host: `127.0.0.1:${port}` }
+  }, (upstreamRes) => {
+    res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
+    upstreamRes.pipe(res);
+  });
+  upstream.on("error", (error) => {
+    const body = JSON.stringify({ error: { message: "Layanan internal belum siap.", code: "internal_unavailable", detail: error.message } });
+    res.writeHead(502, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body) });
+    res.end(body);
+  });
+  req.pipe(upstream);
+}
+
+function proxyRouter(req, res) {
   const upstream = http.request({
     hostname: "127.0.0.1",
     port: INTERNAL_PORT,
     path: req.url,
     method: req.method,
-    headers: {
-      ...req.headers,
-      host: `127.0.0.1:${INTERNAL_PORT}`
-    }
+    headers: { ...req.headers, host: `127.0.0.1:${INTERNAL_PORT}` }
   }, (upstreamRes) => {
     const contentType = String(upstreamRes.headers["content-type"] || "");
     const pathname = new URL(req.url || "/", "http://localhost").pathname;
-    const shouldRewrite =
-      req.method === "POST" &&
-      pathname === "/v1/chat/completions" &&
-      contentType.includes("application/json") &&
-      upstreamRes.statusCode >= 200 &&
-      upstreamRes.statusCode < 300;
+    const shouldRewrite = req.method === "POST" && pathname === "/v1/chat/completions" && contentType.includes("application/json") && (upstreamRes.statusCode || 500) >= 200 && (upstreamRes.statusCode || 500) < 300;
 
     if (!shouldRewrite) {
       res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
@@ -116,61 +133,40 @@ function proxy(req, res) {
     upstreamRes.on("data", (chunk) => chunks.push(chunk));
     upstreamRes.on("end", () => {
       try {
-        const raw = Buffer.concat(chunks).toString("utf8");
-        const body = JSON.stringify(toNexturaJson(JSON.parse(raw)));
-        const headers = {
-          ...upstreamRes.headers,
-          "content-type": "application/json; charset=utf-8",
-          "content-length": Buffer.byteLength(body),
-          "x-nextura-schema": "nextura.chat.v1"
-        };
+        const body = JSON.stringify(toNexturaJson(JSON.parse(Buffer.concat(chunks).toString("utf8"))));
+        const headers = { ...upstreamRes.headers, "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body), "x-nextura-schema": "nextura.chat.v1" };
         delete headers["transfer-encoding"];
         res.writeHead(upstreamRes.statusCode || 200, headers);
         res.end(body);
       } catch {
-        const body = JSON.stringify({
-          error: {
-            message: "Gagal membentuk JSON Nextura.",
-            type: "nextura_gateway_error",
-            code: "json_transform_failed"
-          }
-        });
-        res.writeHead(502, {
-          "content-type": "application/json; charset=utf-8",
-          "content-length": Buffer.byteLength(body)
-        });
+        const body = JSON.stringify({ error: { message: "Gagal membentuk JSON Nextura.", type: "nextura_gateway_error", code: "json_transform_failed" } });
+        res.writeHead(502, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body) });
         res.end(body);
       }
     });
   });
 
   upstream.on("error", (error) => {
-    const body = JSON.stringify({
-      error: {
-        message: "Nextura router belum siap atau tidak dapat dihubungi.",
-        type: "nextura_gateway_error",
-        code: "router_unavailable",
-        detail: error.message
-      }
-    });
-    res.writeHead(502, {
-      "content-type": "application/json; charset=utf-8",
-      "content-length": Buffer.byteLength(body)
-    });
+    const body = JSON.stringify({ error: { message: "Nextura router belum siap atau tidak dapat dihubungi.", type: "nextura_gateway_error", code: "router_unavailable", detail: error.message } });
+    res.writeHead(502, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body) });
     res.end(body);
   });
-
   req.pipe(upstream);
 }
 
-const server = http.createServer(proxy);
+const server = http.createServer((req, res) => {
+  const pathname = new URL(req.url || "/", "http://localhost").pathname;
+  if (pathname.startsWith("/v1/tools/")) return proxyRaw(req, res, TOOL_PORT);
+  return proxyRouter(req, res);
+});
+
 server.keepAliveTimeout = Number(process.env.KEEP_ALIVE_TIMEOUT_MS || 75_000);
 server.headersTimeout = server.keepAliveTimeout + 5_000;
 
 function shutdown(signal) {
   console.log(`[nextura-json] Shutdown ${signal}`);
   server.close(() => {
-    if (!child.killed) child.kill("SIGTERM");
+    for (const child of [routerChild, toolChild]) if (!child.killed) child.kill("SIGTERM");
   });
   setTimeout(() => process.exit(0), 10_000).unref();
 }
@@ -182,4 +178,5 @@ server.listen(PUBLIC_PORT, HOST, () => {
   console.log(`[nextura-json] Gateway online di http://${HOST}:${PUBLIC_PORT}`);
   console.log(`[nextura-json] Koyeb router internal di http://127.0.0.1:${INTERNAL_PORT}`);
   console.log(`[nextura-json] AI router internal di http://127.0.0.1:${ROUTER_PORT}`);
+  console.log(`[nextura-json] Terminal tool internal di http://127.0.0.1:${TOOL_PORT}`);
 });
