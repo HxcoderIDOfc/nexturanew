@@ -2,6 +2,8 @@ FROM node:22-alpine
 
 WORKDIR /app
 
+RUN apk add --no-cache git curl bash openssh-client
+
 COPY package*.json ./
 RUN npm install --omit=dev
 
