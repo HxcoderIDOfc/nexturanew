@@ -4,7 +4,8 @@ import { spawn } from "node:child_process";
 
 const PUBLIC_PORT = Number(process.env.PORT || 8000);
 const HOST = process.env.HOST || "0.0.0.0";
-const INTERNAL_PORT = Number(process.env.GATEWAY_INTERNAL_PORT || (PUBLIC_PORT === 8000 ? 8002 : 8000));
+const INTERNAL_PORT = Number(process.env.GATEWAY_INTERNAL_PORT || (PUBLIC_PORT === 8000 ? 8002 : PUBLIC_PORT + 2));
+const ROUTER_PORT = Number(process.env.ROUTER_INTERNAL_PORT || INTERNAL_PORT + 1);
 
 const AI_NAME = process.env.NEXTURA_AI_NAME || "Nextura AI";
 const MODEL_FAMILY = process.env.NEXTURA_MODEL_FAMILY || "Nextura Cortexa";
@@ -19,6 +20,7 @@ const child = spawn(process.execPath, ["koyeb.js"], {
   env: {
     ...process.env,
     PORT: String(INTERNAL_PORT),
+    INTERNAL_PORT: String(ROUTER_PORT),
     HOST: "127.0.0.1"
   },
   stdio: "inherit"
@@ -125,7 +127,7 @@ function proxy(req, res) {
         delete headers["transfer-encoding"];
         res.writeHead(upstreamRes.statusCode || 200, headers);
         res.end(body);
-      } catch (error) {
+      } catch {
         const body = JSON.stringify({
           error: {
             message: "Gagal membentuk JSON Nextura.",
@@ -179,4 +181,5 @@ process.once("SIGINT", () => shutdown("SIGINT"));
 server.listen(PUBLIC_PORT, HOST, () => {
   console.log(`[nextura-json] Gateway online di http://${HOST}:${PUBLIC_PORT}`);
   console.log(`[nextura-json] Koyeb router internal di http://127.0.0.1:${INTERNAL_PORT}`);
+  console.log(`[nextura-json] AI router internal di http://127.0.0.1:${ROUTER_PORT}`);
 });
