@@ -1,13 +1,14 @@
 {
-  "name": "nextura-ai-router-northflank",
-  "version": "1.0.0",
-  "description": "Nextura AI Router untuk Northflank: Gonka + CometAPI + Agent Search",
+  "name": "nextura-ai-router-koyeb",
+  "version": "2.1.0",
+  "description": "Nextura AI Router untuk Koyeb: Gonka + CometAPI + Agent Search + multi uptime",
   "type": "module",
-  "main": "server.js",
+  "main": "koyeb.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "check": "node --check server.js"
+    "start": "node koyeb.js",
+    "start:router": "node server.js",
+    "dev": "node --watch koyeb.js",
+    "check": "node --check koyeb.js && node --check server.js"
   },
   "engines": {
     "node": ">=22"
