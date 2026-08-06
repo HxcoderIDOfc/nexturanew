@@ -30,7 +30,8 @@ const routerChild = spawn(process.execPath, ["koyeb.js"], {
 const toolChild = spawn(process.execPath, ["terminal-tool.js"], {
   env: {
     ...process.env,
-    TOOL_INTERNAL_PORT: String(TOOL_PORT)
+    TOOL_INTERNAL_PORT: String(TOOL_PORT),
+    NEXTURA_TOOL_KEY: process.env.NEXTURA_TOOL_KEY || process.env.NEXTURA_API_KEY || ""
   },
   stdio: "inherit"
 });
