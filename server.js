@@ -10,6 +10,8 @@ function toBool(value, fallback = false) {
   return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
 }
 
+const THINKING_LEVELS = ["off", "normal", "deep", "extra_deep"];
+
 const CONFIG = {
   port: Number(process.env.PORT || 8000),
   host: process.env.HOST || "0.0.0.0",
@@ -36,9 +38,11 @@ const CONFIG = {
 
   agentSearch: toBool(process.env.ENABLE_AGENT_SEARCH, true),
   deepThinking: toBool(process.env.ENABLE_DEEP_THINKING, true),
+  defaultThinkingLevel: String(process.env.NEXTURA_THINKING_LEVEL || "").trim().toLowerCase(),
   identityEnforcement: toBool(process.env.ENABLE_IDENTITY_ENFORCEMENT, true),
   searchMaxTokens: Number(process.env.SEARCH_MAX_TOKENS || 1800),
   maxOutputTokens: Number(process.env.MAX_OUTPUT_TOKENS || 8192),
+  reviewMaxTokens: Number(process.env.THINKING_REVIEW_MAX_TOKENS || 4096),
   heartbeatMs: Number(process.env.SSE_HEARTBEAT_MS || 15_000),
   upstreamTimeoutMs: Number(process.env.UPSTREAM_TIMEOUT_MS || 9 * 60 * 1000)
 };
@@ -113,6 +117,71 @@ function stripReasoning(text = "") {
     .trim();
 }
 
+function normalizeThinkingLevel(value, fallback = "normal") {
+  const raw = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const aliases = {
+    none: "off",
+    disabled: "off",
+    false: "off",
+    basic: "normal",
+    standard: "normal",
+    high: "deep",
+    deeper: "deep",
+    extra: "extra_deep",
+    extra_deep_thinking: "extra_deep",
+    max: "extra_deep",
+    maximum: "extra_deep"
+  };
+  const normalized = aliases[raw] || raw;
+  return THINKING_LEVELS.includes(normalized) ? normalized : fallback;
+}
+
+function defaultThinkingLevel() {
+  if (!CONFIG.deepThinking) return "off";
+  return normalizeThinkingLevel(CONFIG.defaultThinkingLevel, "normal");
+}
+
+function resolveThinking(body = {}) {
+  let level = defaultThinkingLevel();
+  let show = false;
+
+  if (typeof body.thinking_level === "string") {
+    level = normalizeThinkingLevel(body.thinking_level, level);
+  }
+
+  if (typeof body.thinking === "boolean") {
+    level = body.thinking ? (level === "off" ? "normal" : level) : "off";
+  } else if (typeof body.thinking === "string") {
+    level = normalizeThinkingLevel(body.thinking, level);
+  } else if (body.thinking && typeof body.thinking === "object") {
+    show = body.thinking.show === true;
+    if (body.thinking.enabled === false) level = "off";
+    else if (typeof body.thinking.level === "string") level = normalizeThinkingLevel(body.thinking.level, level === "off" ? "normal" : level);
+    else if (body.thinking.enabled === true && level === "off") level = "normal";
+  }
+
+  const reviewPasses = level === "extra_deep" ? 2 : level === "deep" ? 1 : 0;
+  return {
+    enabled: level !== "off",
+    show: level === "off" ? false : show,
+    level,
+    reviewPasses
+  };
+}
+
+function thinkingInstruction(thinking) {
+  if (!thinking?.enabled || thinking.level === "off") {
+    return "MODE BERPIKIR NEXTURA: off. Jawab langsung dan efisien. Jangan tampilkan chain-of-thought.";
+  }
+  if (thinking.level === "deep") {
+    return "MODE BERPIKIR NEXTURA: deep. Analisis masalah dengan teliti, cek asumsi dan konsistensi, lalu berikan hanya jawaban final. Jangan tampilkan chain-of-thought.";
+  }
+  if (thinking.level === "extra_deep") {
+    return "MODE BERPIKIR NEXTURA: extra_deep. Lakukan analisis menyeluruh, cek asumsi, alternatif, edge case, dan konsistensi sebelum menjawab. Berikan hanya jawaban final; jangan tampilkan chain-of-thought atau reasoning rahasia.";
+  }
+  return "MODE BERPIKIR NEXTURA: normal. Lakukan analisis seperlunya dan berikan hanya jawaban final. Jangan tampilkan chain-of-thought.";
+}
+
 function identityPrompt(publicModel) {
   const modelName = PUBLIC_MODELS[publicModel]?.name || CONFIG.modelFamily;
 
@@ -146,8 +215,9 @@ ATURAN JAWABAN:
 `.trim();
 }
 
-function normalizeMessages(messages = [], publicModel, searchContext = "") {
+function normalizeMessages(messages = [], publicModel, searchContext = "", thinking = null) {
   const prompts = [identityPrompt(publicModel)];
+  if (thinking) prompts.push(thinkingInstruction(thinking));
 
   for (const message of messages) {
     if (message?.role === "system" && typeof message.content === "string") {
@@ -211,14 +281,6 @@ async function fetchJson(url, options, timeoutMs) {
   return data;
 }
 
-function resolveThinking(body = {}) {
-  if (typeof body.thinking === "boolean") return { enabled: body.thinking, show: false };
-  if (body.thinking && typeof body.thinking === "object") {
-    return { enabled: body.thinking.enabled !== false, show: body.thinking.show === true };
-  }
-  return { enabled: CONFIG.deepThinking, show: false };
-}
-
 function providerConfig(publicModel) {
   const model = PUBLIC_MODELS[publicModel];
   if (!model) throw Object.assign(new Error(`Model '${publicModel}' tidak tersedia.`), { statusCode: 400 });
@@ -261,17 +323,18 @@ function buildUpstreamBody(body, route, publicModel, searchContext, thinking) {
   const upstream = {
     ...body,
     model: route.upstreamModel,
-    messages: normalizeMessages(body.messages, publicModel, searchContext),
+    messages: normalizeMessages(body.messages, publicModel, searchContext, thinking),
     max_tokens: Math.min(Number(body.max_tokens || CONFIG.maxOutputTokens), CONFIG.maxOutputTokens)
   };
 
   delete upstream.agent_search;
   delete upstream.provider;
+  delete upstream.thinking_level;
 
   if (route.provider === "gonka") {
     upstream.search = Boolean(body.agent_search ?? body.search ?? false);
     upstream.review = body.review !== false;
-    upstream.thinking = thinking;
+    upstream.thinking = { enabled: thinking.enabled, show: thinking.show };
   } else {
     delete upstream.search;
     delete upstream.review;
@@ -279,6 +342,39 @@ function buildUpstreamBody(body, route, publicModel, searchContext, thinking) {
   }
 
   return upstream;
+}
+
+async function runThinkingReview(content, messages, publicModel, thinking) {
+  let current = stripReasoning(content);
+  if (!current || !CONFIG.gonkaKey || thinking.reviewPasses <= 0) return current;
+
+  const userRequest = latestUserText(messages).slice(0, 12000);
+  for (let pass = 1; pass <= thinking.reviewPasses; pass++) {
+    const isFinalPass = pass === thinking.reviewPasses;
+    const reviewPrompt = thinking.level === "extra_deep"
+      ? `Kamu adalah reviewer internal ${CONFIG.aiName}. Ini pass ${pass}/${thinking.reviewPasses} untuk mode extra_deep. Periksa akurasi, logika, asumsi, edge case, kontradiksi, relevansi, dan kelengkapan jawaban. Perbaiki semua masalah yang ditemukan. ${isFinalPass ? "Lakukan pemeriksaan final yang ketat." : "Siapkan versi yang lebih kuat untuk pemeriksaan berikutnya."} Keluarkan HANYA jawaban final yang sudah diperbaiki, tanpa kritik, tanpa catatan proses, tanpa chain-of-thought.`
+      : `Kamu adalah reviewer internal ${CONFIG.aiName} untuk mode deep. Periksa akurasi, logika, asumsi, konsistensi, dan kelengkapan. Perbaiki bila perlu. Keluarkan HANYA jawaban final yang sudah diperbaiki, tanpa kritik, tanpa catatan proses, tanpa chain-of-thought.`;
+
+    const data = await fetchJson(`${CONFIG.gonkaBaseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${CONFIG.gonkaKey}` },
+      body: JSON.stringify({
+        model: CONFIG.gonkaModel,
+        messages: [
+          { role: "system", content: reviewPrompt },
+          { role: "user", content: `PERMINTAAN PENGGUNA:\n${userRequest}\n\nJAWABAN YANG DIREVIEW:\n${current}` }
+        ],
+        stream: false,
+        max_tokens: Math.min(CONFIG.reviewMaxTokens, CONFIG.maxOutputTokens),
+        thinking: { enabled: true, show: false }
+      })
+    });
+
+    const revised = stripReasoning(data?.choices?.[0]?.message?.content || "");
+    if (revised) current = revised;
+  }
+
+  return current;
 }
 
 async function enforceIdentity(content, publicModel) {
@@ -307,8 +403,9 @@ async function enforceIdentity(content, publicModel) {
   return stripReasoning(data?.choices?.[0]?.message?.content || clean);
 }
 
-async function rewriteNonStream(data, publicModel, provider, requestStartedAt, searched, thinking) {
-  const content = await enforceIdentity(data?.choices?.[0]?.message?.content || "", publicModel);
+async function rewriteNonStream(data, publicModel, provider, requestStartedAt, searched, thinking, originalMessages) {
+  const reviewed = await runThinkingReview(data?.choices?.[0]?.message?.content || "", originalMessages, publicModel, thinking);
+  const content = await enforceIdentity(reviewed, publicModel);
   return {
     ...data,
     id: data?.id || requestId(),
@@ -329,13 +426,15 @@ async function rewriteNonStream(data, publicModel, provider, requestStartedAt, s
       agent_search: searched,
       identity_enforced: CONFIG.identityEnforcement,
       deep_thinking: thinking.enabled,
+      thinking_level: thinking.level,
+      thinking_review_passes: thinking.reviewPasses,
       thinking_visible: thinking.show,
       latency_ms: Date.now() - requestStartedAt
     }
   };
 }
 
-function rewriteSseLine(line, publicModel) {
+function rewriteSseLine(line, publicModel, thinking) {
   if (!line.startsWith("data:")) return line;
   const payload = line.slice(5).trim();
   if (!payload || payload === "[DONE]") return line;
@@ -346,7 +445,11 @@ function rewriteSseLine(line, publicModel) {
     parsed.x_nextura = {
       ai_name: CONFIG.aiName,
       model_name: PUBLIC_MODELS[publicModel]?.name,
-      developer: CONFIG.developer
+      developer: CONFIG.developer,
+      deep_thinking: thinking.enabled,
+      thinking_level: thinking.level,
+      thinking_review_passes: 0,
+      thinking_visible: thinking.show
     };
 
     for (const choice of parsed.choices || []) {
@@ -360,7 +463,7 @@ function rewriteSseLine(line, publicModel) {
   }
 }
 
-async function streamUpstream(reply, route, upstreamBody, publicModel) {
+async function streamUpstream(reply, route, upstreamBody, publicModel, thinking) {
   const response = await fetchWithTimeout(route.url, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${route.key}` },
@@ -394,9 +497,9 @@ async function streamUpstream(reply, route, upstreamBody, publicModel) {
       buffer += decoder.decode(chunk, { stream: true });
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() || "";
-      for (const line of lines) reply.raw.write(`${rewriteSseLine(line, publicModel)}\n`);
+      for (const line of lines) reply.raw.write(`${rewriteSseLine(line, publicModel, thinking)}\n`);
     }
-    if (buffer) reply.raw.write(`${rewriteSseLine(buffer, publicModel)}\n`);
+    if (buffer) reply.raw.write(`${rewriteSseLine(buffer, publicModel, thinking)}\n`);
     reply.raw.write("data: [DONE]\n\n");
   } finally {
     clearInterval(heartbeat);
@@ -413,13 +516,15 @@ function uptimePayload() {
     developer: CONFIG.developer,
     company: CONFIG.company,
     platform: process.env.KOYEB_APP_NAME ? "Koyeb" : "Node.js",
-    version: "2.2.0",
+    version: "2.3.0",
     uptime_seconds: Math.floor((Date.now() - startedAt) / 1000),
     timestamp: new Date().toISOString(),
     models: Object.entries(PUBLIC_MODELS).map(([id, model]) => ({ id, name: model.name })),
     agent_search: CONFIG.agentSearch,
     identity_enforcement: CONFIG.identityEnforcement,
     deep_thinking_default: CONFIG.deepThinking,
+    thinking_default_level: defaultThinkingLevel(),
+    thinking_levels: THINKING_LEVELS,
     providers_configured: { gonka: Boolean(CONFIG.gonkaKey), comet: Boolean(CONFIG.cometKey) }
   };
 }
@@ -468,7 +573,7 @@ app.post("/v1/chat/completions", { preHandler: authenticate }, async (request, r
       : "";
 
     const upstreamBody = buildUpstreamBody(body, route, publicModel, searchContext, thinking);
-    if (body.stream === true) return await streamUpstream(reply, route, upstreamBody, publicModel);
+    if (body.stream === true) return await streamUpstream(reply, route, upstreamBody, publicModel, thinking);
 
     const data = await fetchJson(route.url, {
       method: "POST",
@@ -476,7 +581,7 @@ app.post("/v1/chat/completions", { preHandler: authenticate }, async (request, r
       body: JSON.stringify({ ...upstreamBody, stream: false })
     });
 
-    return await rewriteNonStream(data, publicModel, route.provider, requestStartedAt, searchEnabled, thinking);
+    return await rewriteNonStream(data, publicModel, route.provider, requestStartedAt, searchEnabled, thinking, body.messages);
   } catch (error) {
     request.log.error({ err: error }, "Nextura upstream error");
     const statusCode = Number(error?.statusCode || 502);
