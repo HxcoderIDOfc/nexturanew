@@ -44,4 +44,4 @@ async function resolveLocation() {
 
 await resolveLocation();
 console.log(`[location-bootstrap] Public location: ${process.env.NEXTURA_DEVELOPER_LOCATION}`);
-await import("./terminal-agent.js");
+await import("./sdk-compat.js");
