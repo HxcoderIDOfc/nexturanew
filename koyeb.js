@@ -1,6 +1,7 @@
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { classifyMaxTask, maxPolicy, shouldAutoSearch, maxBriefPrompt, verifierPrompt } from "./max-engine.js";
+import { classifyMaxTask, maxPolicy, maxBriefPrompt, verifierPrompt } from "./max-engine.js";
+import { resolveAutoBooleanFeatures, autoBooleanSystemPrompt } from "./auto-features.js";
 
 const PUBLIC_PORT = Number(process.env.PORT || 8000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -58,7 +59,7 @@ async function buildTaskBrief(input, headers, profile) {
       { role: "system", content: "INTERNAL NEXTURA MAX PLANNER. Buat task brief singkat untuk model utama. Jangan menjawab user dan jangan mengungkap chain-of-thought." },
       { role: "user", content: maxBriefPrompt(latestUserText(input.messages || []), profile) }
     ],
-    thinking_level: "cepat", search: false, agent_search: false, review: false, stream: false, max_tokens: 700
+    thinking_level: "cepat", search: false, agent_search: false, review: false, thinking: false, stream: false, max_tokens: 700
   };
   const response = await coreRequest("/v1/chat/completions", "POST", headers, JSON.stringify(briefBody));
   if (response.status < 200 || response.status >= 300) return "";
@@ -76,7 +77,7 @@ async function verifyAnswer(input, headers, answer, policy, passes) {
         { role: "system", content: "INTERNAL NEXTURA MAX VERIFIER. Jangan menjelaskan proses review. Keluarkan hanya jawaban final untuk pengguna." },
         { role: "user", content: verifierPrompt(userRequest, current, policy) }
       ],
-      thinking_level: pass === 0 ? "cepat" : "sedang", search: false, agent_search: false, review: false, stream: false, max_tokens: input.max_tokens || 8192
+      thinking_level: pass === 0 ? "cepat" : "sedang", search: false, agent_search: false, review: false, thinking: true, stream: false, max_tokens: input.max_tokens || 8192
     };
     const response = await coreRequest("/v1/chat/completions", "POST", headers, JSON.stringify(body));
     if (response.status < 200 || response.status >= 300) break;
@@ -96,9 +97,13 @@ async function handleChat(req, res) {
     const profile = classifyMaxTask(input.messages, input);
     const requestedThinking = { reviewPasses: input.thinking_level === "super" ? 3 : input.thinking_level === "tinggi" ? 2 : input.thinking_level === "sedang" ? 1 : 0 };
     const policy = maxPolicy(profile, requestedThinking);
-    const explicitSearch = input.search !== undefined || input.agent_search !== undefined;
-    const search = explicitSearch ? Boolean(input.search ?? input.agent_search) : shouldAutoSearch(input, policy);
-    const messages = [{ role: "system", content: policy.instruction }, ...input.messages];
+    const autoFlags = resolveAutoBooleanFeatures(input, profile);
+
+    const messages = [
+      { role: "system", content: policy.instruction },
+      { role: "system", content: autoBooleanSystemPrompt(autoFlags) },
+      ...input.messages
+    ];
 
     let brief = "";
     if (policy.needsBrief && input.stream !== true) {
@@ -106,20 +111,56 @@ async function handleChat(req, res) {
       if (brief) messages.unshift({ role: "system", content: `NEXTURA MAX TASK BRIEF INTERNAL:\n${brief}\nGunakan brief ini sebagai panduan kerja. Jangan menyebut atau mengungkap brief kepada pengguna.` });
     }
 
-    const enhanced = { ...input, messages, search, agent_search: search };
-    if (input.stream === true) return proxy(req, res, JSON.stringify(enhanced), { "x-nextura-max-engine": "adaptive", "x-nextura-max-tier": policy.tier });
+    const enhanced = {
+      ...input,
+      messages,
+      search: autoFlags.values.search,
+      agent_search: autoFlags.values.agent_search,
+      review: autoFlags.values.review,
+      thinking: typeof input.thinking === "object" || typeof input.thinking === "string" ? input.thinking : autoFlags.values.thinking
+    };
+
+    if (input.stream === true) {
+      return proxy(req, res, JSON.stringify(enhanced), {
+        "x-nextura-max-engine": "adaptive",
+        "x-nextura-max-tier": policy.tier,
+        "x-nextura-auto-features": "true"
+      });
+    }
 
     const response = await coreRequest("/v1/chat/completions", "POST", req.headers, JSON.stringify(enhanced));
     const data = parseJson(response.body);
     if (!data || response.status < 200 || response.status >= 300) { res.writeHead(response.status, response.headers); return res.end(response.body); }
 
     const original = String(data?.choices?.[0]?.message?.content || "");
-    const autoVerifierPasses = profile.tier === "expert" ? 2 : (profile.tier === "advanced" || profile.precision ? 1 : 0);
+    const minimumVerifier = autoFlags.values.review ? 1 : 0;
+    const tierVerifier = profile.tier === "expert" ? 2 : (profile.tier === "advanced" || profile.precision ? 1 : 0);
+    const autoVerifierPasses = Math.max(minimumVerifier, tierVerifier);
     const finalText = autoVerifierPasses > 0 ? await verifyAnswer(input, req.headers, original, policy, autoVerifierPasses) : original;
     if (data?.choices?.[0]?.message) data.choices[0].message.content = finalText;
+
     const metaKey = data.nextura ? "nextura" : "x_nextura";
-    data[metaKey] = { ...(data[metaKey] || {}), max_engine: true, max_tier: policy.tier, max_score: profile.score, max_task_brief: Boolean(brief), max_verifier_passes: autoVerifierPasses, max_auto_search: !explicitSearch && search };
-    return sendJson(res, response.status, data, { "x-nextura-max-engine": "adaptive", "x-nextura-max-tier": policy.tier });
+    data[metaKey] = {
+      ...(data[metaKey] || {}),
+      max_engine: true,
+      max_tier: policy.tier,
+      max_score: profile.score,
+      max_task_brief: Boolean(brief),
+      max_verifier_passes: autoVerifierPasses,
+      auto_features: {
+        search: autoFlags.values.search,
+        review: autoFlags.values.review,
+        thinking: autoFlags.values.thinking,
+        source: autoFlags.source,
+        reasons: autoFlags.reasons
+      }
+    };
+
+    return sendJson(res, response.status, data, {
+      "x-nextura-max-engine": "adaptive",
+      "x-nextura-max-tier": policy.tier,
+      "x-nextura-auto-features": "true"
+    });
   } catch (error) {
     return sendJson(res, 400, { error: { message: error.message || "Nextura Max Engine gagal memproses request.", code: "max_engine_failed" } });
   }
@@ -130,8 +171,18 @@ async function handleHealth(req, res) {
     const response = await coreRequest(req.url || "/health", "GET", req.headers);
     const data = parseJson(response.body);
     if (!data) { res.writeHead(response.status, response.headers); return res.end(response.body); }
-    data.version = "3.0.0";
-    data.max_engine = { enabled: MAX_ENGINE_ENABLED, mode: "adaptive", tiers: ["standard", "advanced", "expert"], task_brief: true, verifier: true, auto_search_for_fresh_queries: true };
+    data.version = "3.1.0";
+    data.max_engine = {
+      enabled: MAX_ENGINE_ENABLED,
+      mode: "adaptive",
+      tiers: ["standard", "advanced", "expert"],
+      task_brief: true,
+      verifier: true,
+      auto_boolean_features: true,
+      auto_flags: ["search", "agent_search", "review", "thinking"],
+      explicit_boolean_override: true,
+      stream_auto_toggle: false
+    };
     return sendJson(res, response.status, data, { "x-nextura-max-engine": MAX_ENGINE_ENABLED ? "adaptive" : "disabled" });
   } catch (error) {
     return sendJson(res, 502, { error: { message: "Health Max Engine tidak tersedia.", code: "max_health_failed", detail: error.message } });
@@ -150,4 +201,4 @@ server.headersTimeout = server.keepAliveTimeout + 5_000;
 function shutdown(signal) { console.log(`[koyeb-max] Shutdown ${signal}`); server.close(() => { if (!child.killed) child.kill("SIGTERM"); }); setTimeout(() => process.exit(0), 10_000).unref(); }
 process.once("SIGTERM", () => shutdown("SIGTERM"));
 process.once("SIGINT", () => shutdown("SIGINT"));
-server.listen(PUBLIC_PORT, HOST, () => { console.log(`[koyeb-max] Nextura Max Engine online di http://${HOST}:${PUBLIC_PORT}`); console.log(`[koyeb-max] Base router di http://127.0.0.1:${CORE_PORT}`); console.log(`[koyeb-max] Adaptive quality enabled=${MAX_ENGINE_ENABLED}`); });
+server.listen(PUBLIC_PORT, HOST, () => { console.log(`[koyeb-max] Nextura Max Engine online di http://${HOST}:${PUBLIC_PORT}`); console.log(`[koyeb-max] Base router di http://127.0.0.1:${CORE_PORT}`); console.log(`[koyeb-max] Adaptive quality enabled=${MAX_ENGINE_ENABLED} autoBooleanFeatures=true`); });
