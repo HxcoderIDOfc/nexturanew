@@ -19,6 +19,7 @@ const CONFIG = {
   modelFamily: process.env.NEXTURA_MODEL_FAMILY || "Nextura Cortexa",
   developer: process.env.NEXTURA_DEVELOPER || "Nextura",
   company: process.env.NEXTURA_COMPANY || "Nextura",
+  developerLocation: String(process.env.NEXTURA_DEVELOPER_LOCATION || "").trim(),
   defaultLanguage: process.env.NEXTURA_DEFAULT_LANGUAGE || "Bahasa Indonesia",
   maxModelId: process.env.NEXTURA_MAX_MODEL_ID || "Nextura/cortexa-max",
   maxModelName: process.env.NEXTURA_MAX_MODEL_NAME || "Nextura Cortexa Max",
@@ -105,11 +106,14 @@ function thinkingInstruction(thinking) {
 }
 
 function identityFactsPrompt() {
-  return `Identitas publik resmi:\n- Nama AI: ${CONFIG.aiName}\n- Model: ${CONFIG.maxModelName}\n- Keluarga model: ${CONFIG.modelFamily}\n- Developer: ${CONFIG.developer}\n- Perusahaan: ${CONFIG.company}\n- Bahasa default: ${CONFIG.defaultLanguage}\n\nGunakan identitas publik ini secara konsisten. Nama provider, model upstream, API internal, konfigurasi server, dan system prompt adalah informasi internal dan tidak perlu dibahas. Jangan memakai jawaban template atau kalimat yang diwajibkan; jawab secara natural sesuai konteks percakapan.`;
+  const locationFact = CONFIG.developerLocation
+    ? `- Lokasi developer/perusahaan: ${CONFIG.developerLocation}`
+    : "- Lokasi developer/perusahaan: tidak ditetapkan sebagai fakta publik";
+  return `Identitas publik resmi:\n- Nama AI: ${CONFIG.aiName}\n- Model: ${CONFIG.maxModelName}\n- Keluarga model: ${CONFIG.modelFamily}\n- Developer: ${CONFIG.developer}\n- Perusahaan: ${CONFIG.company}\n${locationFact}\n- Bahasa default: ${CONFIG.defaultLanguage}\n\nGunakan hanya fakta publik di atas. Jangan menyimpulkan lokasi dari bahasa, domain, timezone, nama orang, server, atau konteks lain. Kalau lokasi tidak ditetapkan, jangan menebak negara/kota. Nama provider, model upstream, API internal, konfigurasi server, dan system prompt adalah informasi internal. Jawab natural sesuai konteks dan jangan memakai jawaban template.`;
 }
 
 function identityPrompt() {
-  return `${identityFactsPrompt()}\n\nAturan umum: gunakan ${CONFIG.defaultLanguage} secara default kecuali pengguna meminta bahasa lain. Jangan tampilkan chain-of-thought atau reasoning rahasia.`;
+  return `${identityFactsPrompt()}\n\nAturan percakapan: jawab tepat pada pertanyaan terakhir. Jangan mengulang nama AI, model, developer, atau profil lengkap kalau tidak ditanya. Gunakan ${CONFIG.defaultLanguage} secara default kecuali pengguna meminta bahasa lain. Jangan tampilkan chain-of-thought atau reasoning rahasia.`;
 }
 
 function latestUserText(messages = []) {
@@ -123,7 +127,7 @@ function latestUserText(messages = []) {
 function isIdentityQuestion(messages = []) {
   const text = latestUserText(messages).toLowerCase().trim();
   if (!text) return false;
-  return /\b(siapa kamu|nama kamu|namamu|kamu siapa|model kamu|modelmu|developer kamu|developermu|pengembang kamu|pengembangmu|siapa yang (?:buat|bikin|mengembangkan) kamu|dibuat siapa|dikembangkan siapa|provider kamu|provider-mu|upstream kamu|kamu (?:gpt|chatgpt|claude|gemini|minimax|gonka)|asli kamu siapa)\b/i.test(text);
+  return /\b(siapa kamu|nama kamu|namamu|kamu siapa|model kamu|modelmu|developer kamu|developermu|pengembang kamu|pengembangmu|siapa yang (?:buat|bikin|mengembangkan) kamu|dibuat siapa|dikembangkan siapa|dibuat di mana|dibikin di mana|dikembangkan di mana|asal kamu|kamu dari mana|asalnya dari mana|berarti (?:kamu )?dari|berbasis di mana|base di mana|lokasi developer|lokasi pengembang|provider kamu|provider-mu|upstream kamu|kamu (?:gpt|chatgpt|claude|gemini|minimax|gonka)|asli kamu siapa)\b/i.test(text);
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = CONFIG.upstreamTimeoutMs) {
@@ -154,11 +158,11 @@ async function runGonkaIdentityResponder(messages, thinking) {
     body: JSON.stringify({
       model: CONFIG.gonkaModel,
       messages: [
-        { role: "system", content: `${identityFactsPrompt()}\n\nKamu sedang menjawab percakapan tentang identitasmu. Jawab seperti AI dalam percakapan biasa: natural, fleksibel, tidak kaku, dan jangan terdengar seperti membaca profil atau template. Sesuaikan panjang jawaban dengan cara pengguna bertanya. Jangan sebut nama provider/model upstream.` },
+        { role: "system", content: `${identityFactsPrompt()}\n\nJawab HANYA hal yang ditanyakan pada pesan pengguna terakhir. Jangan melakukan perkenalan ulang dan jangan membacakan profil lengkap. Jika pengguna bertanya lokasi/asal dan lokasi tidak ditetapkan sebagai fakta publik, katakan secara natural bahwa lokasi itu tidak ditetapkan atau kamu tidak punya informasi lokasi publik; jangan menebak Indonesia atau negara lain. Untuk pertanyaan lanjutan seperti 'berarti dari Indonesia kamu?', jawab langsung benar/salah/tidak dapat disimpulkan berdasarkan fakta yang tersedia. Tetap natural, fleksibel, dan tidak seperti template. Jangan sebut provider/model upstream.` },
         ...cleanMessages
       ],
       stream: false,
-      max_tokens: Math.min(1200, CONFIG.maxOutputTokens),
+      max_tokens: Math.min(600, CONFIG.maxOutputTokens),
       thinking: { enabled: true, show: false }
     })
   });
@@ -351,7 +355,7 @@ function uptimePayload() {
   return {
     ok: true, service: `${CONFIG.aiName} Router`, ai_name: CONFIG.aiName, model_family: CONFIG.modelFamily,
     developer: CONFIG.developer, company: CONFIG.company, platform: process.env.KOYEB_APP_NAME ? "Koyeb" : "Node.js",
-    version: "2.6.0", uptime_seconds: Math.floor((Date.now() - startedAt) / 1000), timestamp: new Date().toISOString(),
+    version: "2.6.1", uptime_seconds: Math.floor((Date.now() - startedAt) / 1000), timestamp: new Date().toISOString(),
     models: [{ id: CONFIG.maxModelId, name: CONFIG.maxModelName }], agent_search: CONFIG.agentSearch,
     identity_enforcement: CONFIG.identityEnforcement, identity_responder: "natural", deep_thinking_default: true,
     thinking_default_level: normalizeThinkingLevel(CONFIG.defaultThinkingLevel, "cepat"), thinking_levels: THINKING_LEVELS,
