@@ -223,6 +223,10 @@ function wantsWebReader(text = "") {
   return /\b(cek|check|buka|open|baca|read|lihat|kunjungi|visit|akses|access|pelajari|ringkas|rangkum|analisis|dokumentasi|documentation|docs|website|web|situs|site|halaman|page|api reference|getting started|guide|panduan)\b/i.test(text);
 }
 
+function wantsDeepWebRead(text = "") {
+  return /\b(semua|seluruh|lengkap|secara lengkap|detail lengkap|telusuri|jelajahi|crawl|semua halaman|seluruh halaman|semua dokumentasi|seluruh dokumentasi|endpoint lengkap|semua endpoint|cari endpoint|api lengkap|dokumentasi lengkap|baca semua|baca seluruh|pelajari semua|pelajari seluruh|bandingkan (?:bagian|halaman)|multi[- ]?page)\b/i.test(String(text));
+}
+
 async function runHttpTool(urlValue, incomingHeaders, options = {}) {
   const url = await validatePublicHttpUrl(urlValue);
   const controller = new AbortController();
@@ -320,7 +324,8 @@ function extractSameOriginLinks(baseValue, html = "") {
   return out.sort((a, b) => b.score - a.score).map((x) => x.url);
 }
 
-async function runWebReader(target, incomingHeaders) {
+async function runWebReader(target, incomingHeaders, options = {}) {
+  const maxPages = Math.max(1, Math.min(Number(options.maxPages || 1), WEB_READER_MAX_PAGES));
   const first = await runHttpTool(target, incomingHeaders, { forwardAuthorization: false, userAgent: "Nextura-Web-Reader/1.0" });
   const pages = [];
   const firstHtml = /text\/html|application\/xhtml\+xml/i.test(first.content_type);
@@ -331,8 +336,8 @@ async function runWebReader(target, incomingHeaders) {
     text: firstHtml ? htmlToReadableText(first.body) : first.body
   });
 
-  if (first.ok && firstHtml && WEB_READER_MAX_PAGES > 1) {
-    const links = extractSameOriginLinks(first.final_url, first.body).slice(0, WEB_READER_MAX_PAGES - 1);
+  if (first.ok && firstHtml && maxPages > 1) {
+    const links = extractSameOriginLinks(first.final_url, first.body).slice(0, maxPages - 1);
     for (const link of links) {
       try {
         const page = await runHttpTool(link, incomingHeaders, { forwardAuthorization: false, userAgent: "Nextura-Web-Reader/1.0" });
@@ -359,6 +364,7 @@ async function runWebReader(target, incomingHeaders) {
 
   return {
     target,
+    mode: maxPages > 1 ? "deep" : "single_page",
     pages_read: compactPages.length,
     pages: compactPages
   };
@@ -375,15 +381,16 @@ async function prepareChatBody(body, headers) {
 
   if (target && wantsWebReader(text) && !looksLikeImageUrl(target)) {
     try {
-      const result = await runWebReader(target, headers);
+      const deepRead = wantsDeepWebRead(text);
+      const result = await runWebReader(target, headers, { maxPages: deepRead ? WEB_READER_MAX_PAGES : 1 });
       next.messages = [
         {
           role: "system",
-          content: `NEXTURA WEB READER SUDAH MEMBUKA WEBSITE SECARA NYATA. Jangan meminta user memberi tautan lagi dan jangan mengaku belum membuka web. Jawab langsung berdasarkan isi halaman aktual berikut. Jika beberapa halaman terbaca, gabungkan informasinya. Jangan mengarang hal yang tidak ada di halaman.\n${JSON.stringify(result)}`
+          content: `NEXTURA WEB READER SUDAH MEMBUKA WEBSITE SECARA NYATA. Jangan meminta user memberi tautan lagi dan jangan mengaku belum membuka web. Jawab berdasarkan isi aktual berikut. MODE BACA: ${deepRead ? "mendalam lintas halaman karena user meminta cakupan luas" : "satu halaman saja karena user tidak meminta penelusuran menyeluruh"}. Jika mode satu halaman, jawab hanya inti yang relevan dengan pertanyaan user: apa situs/dokumen ini, untuk apa, dan bagaimana penggunaannya secara garis besar. Jangan merender, menyalin, atau menjabarkan seluruh isi halaman/dokumentasi. Jangan membuat daftar semua bagian kecuali user memintanya. Jika mode mendalam, gabungkan informasi beberapa halaman hanya sejauh yang diminta user. Jangan mengarang hal yang tidak ada di halaman.\n${JSON.stringify(result)}`
         },
         ...(next.messages || [])
       ];
-      toolUsed = "web_reader";
+      toolUsed = deepRead ? "web_reader_deep" : "web_reader";
     } catch (error) {
       next.messages = [
         { role: "system", content: `NEXTURA WEB READER sudah mencoba membuka ${target}, tetapi gagal secara nyata: ${error.message}. Jelaskan kegagalan aktual ini; jangan mengatakan bahwa kamu tidak punya kemampuan membuka web.` },
