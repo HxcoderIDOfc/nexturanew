@@ -77,6 +77,8 @@ function toNexturaJson(data = {}) {
       search_plugin: sourceMeta.search_plugin || null,
       identity_enforced: sourceMeta.identity_enforced !== false,
       deep_thinking: Boolean(sourceMeta.deep_thinking),
+      thinking_level: sourceMeta.thinking_level || (sourceMeta.deep_thinking ? "normal" : "off"),
+      thinking_review_passes: Number(sourceMeta.thinking_review_passes || 0),
       thinking_visible: Boolean(sourceMeta.thinking_visible),
       tool_used: sourceMeta.tool_used || null,
       vision_url: Boolean(sourceMeta.vision_url),
@@ -300,5 +302,5 @@ server.listen(PUBLIC_PORT, HOST, () => {
   console.log(`[nextura-json] Koyeb router internal di http://127.0.0.1:${INTERNAL_PORT}`);
   console.log(`[nextura-json] AI router internal di http://127.0.0.1:${ROUTER_PORT}`);
   console.log(`[nextura-json] Terminal tool internal di http://127.0.0.1:${TOOL_PORT}`);
-  console.log("[nextura-json] HTTP tool, Gonka web plugin, time awareness, dan vision URL aktif pada /v1/chat/completions");
+  console.log("[nextura-json] HTTP tool, Gonka web plugin, time awareness, thinking levels, dan vision URL aktif pada /v1/chat/completions");
 });
