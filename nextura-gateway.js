@@ -17,8 +17,6 @@ const AI_NAME = process.env.NEXTURA_AI_NAME || "Nextura AI";
 const MODEL_FAMILY = process.env.NEXTURA_MODEL_FAMILY || "Nextura Cortexa";
 const DEVELOPER = process.env.NEXTURA_DEVELOPER || "Nextura";
 const COMPANY = process.env.NEXTURA_COMPANY || "Nextura";
-const PRO_MODEL_ID = process.env.NEXTURA_PRO_MODEL_ID || "Nextura/cortexa-pro";
-const PRO_MODEL_NAME = process.env.NEXTURA_PRO_MODEL_NAME || "Nextura Cortexa Pro";
 const MAX_MODEL_ID = process.env.NEXTURA_MAX_MODEL_ID || "Nextura/cortexa-max";
 const MAX_MODEL_NAME = process.env.NEXTURA_MAX_MODEL_NAME || "Nextura Cortexa Max";
 
@@ -41,43 +39,53 @@ for (const [name, child] of [["router", routerChild], ["tool", toolChild]]) {
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body), "cache-control": "no-store" });
+  res.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": Buffer.byteLength(body),
+    "cache-control": "no-store"
+  });
   res.end(body);
 }
 
-function modelName(id) { return id === MAX_MODEL_ID ? MAX_MODEL_NAME : PRO_MODEL_NAME; }
 function nexturaId() { return `nextura_${crypto.randomBytes(12).toString("hex")}`; }
 
 function normalizeUsage(usage = {}) {
   const promptTokens = Number(usage.prompt_tokens || 0);
   const completionTokens = Number(usage.completion_tokens || 0);
-  return { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: Number(usage.total_tokens || promptTokens + completionTokens) };
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: Number(usage.total_tokens || promptTokens + completionTokens)
+  };
 }
 
 function toNexturaJson(data = {}) {
-  const publicModel = data.model || PRO_MODEL_ID;
   const choice = data?.choices?.[0] || {};
   const sourceMeta = data.nextura || data.x_nextura || {};
   return {
     id: String(data.id || nexturaId()).replace(/^devshard-/i, "nextura-"),
     object: "chat.completion",
     created: Number(data.created || Math.floor(Date.now() / 1000)),
-    model: publicModel,
-    choices: [{ index: 0, message: { role: "assistant", content: choice?.message?.content || "" }, finish_reason: choice.finish_reason || "stop" }],
+    model: MAX_MODEL_ID,
+    choices: [{
+      index: 0,
+      message: { role: "assistant", content: choice?.message?.content || "" },
+      finish_reason: choice.finish_reason || "stop"
+    }],
     usage: normalizeUsage(data.usage),
     nextura: {
       schema: "nextura.chat.v1",
       ai_name: sourceMeta.ai_name || AI_NAME,
-      model_id: publicModel,
-      model_name: sourceMeta.model_name || modelName(publicModel),
+      model_id: MAX_MODEL_ID,
+      model_name: sourceMeta.model_name || MAX_MODEL_NAME,
       model_family: MODEL_FAMILY,
       developer: sourceMeta.developer || DEVELOPER,
       company: COMPANY,
       agent_search: Boolean(sourceMeta.agent_search),
       search_plugin: sourceMeta.search_plugin || null,
       identity_enforced: sourceMeta.identity_enforced !== false,
-      deep_thinking: Boolean(sourceMeta.deep_thinking),
-      thinking_level: sourceMeta.thinking_level || (sourceMeta.deep_thinking ? "normal" : "off"),
+      deep_thinking: true,
+      thinking_level: sourceMeta.thinking_level || "cepat",
       thinking_review_passes: Number(sourceMeta.thinking_review_passes || 0),
       thinking_visible: Boolean(sourceMeta.thinking_visible),
       tool_used: sourceMeta.tool_used || null,
@@ -87,32 +95,58 @@ function toNexturaJson(data = {}) {
   };
 }
 
-function tokenFromHeaders(headers = {}) { return String(headers.authorization || "").replace(/^Bearer\s+/i, "").trim(); }
+function tokenFromHeaders(headers = {}) {
+  return String(headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+}
+
 function latestUserMessage(messages = []) {
-  for (let i = messages.length - 1; i >= 0; i--) if (messages[i]?.role === "user") return { message: messages[i], index: i };
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "user") return { message: messages[i], index: i };
+  }
   return { message: null, index: -1 };
 }
+
 function contentText(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content.filter((x) => x?.type === "text" || x?.type === "input_text").map((x) => x.text || "").join("\n");
+  return content
+    .filter((x) => x?.type === "text" || x?.type === "input_text")
+    .map((x) => x.text || "")
+    .join("\n");
 }
-function extractUrls(text = "") { return [...String(text).matchAll(/https?:\/\/[^\s<>"')\]]+/gi)].map((m) => m[0].replace(/[.,;:!?]+$/, "")); }
+
+function extractUrls(text = "") {
+  return [...String(text).matchAll(/https?:\/\/[^\s<>"')\]]+/gi)]
+    .map((m) => m[0].replace(/[.,;:!?]+$/, ""));
+}
+
 function looksLikeImageUrl(value = "") {
-  try { const url = new URL(value); return /\.(?:png|jpe?g|webp|gif|bmp|avif)(?:$|\?)/i.test(url.pathname + url.search); }
-  catch { return false; }
+  try {
+    const url = new URL(value);
+    return /\.(?:png|jpe?g|webp|gif|bmp|avif)(?:$|\?)/i.test(url.pathname + url.search);
+  } catch {
+    return false;
+  }
 }
 
 function attachVisionUrl(body) {
   const messages = Array.isArray(body.messages) ? structuredClone(body.messages) : [];
   const { message, index } = latestUserMessage(messages);
-  if (!message) return { body, attached: false };
-  if (Array.isArray(message.content) && message.content.some((p) => ["image_url", "input_image", "image"].includes(p?.type))) return { body: { ...body, messages }, attached: true };
+  if (!message) return { body: { ...body, model: MAX_MODEL_ID, messages }, attached: false };
+
+  if (Array.isArray(message.content) && message.content.some((p) => ["image_url", "input_image", "image"].includes(p?.type))) {
+    return { body: { ...body, model: MAX_MODEL_ID, messages }, attached: true };
+  }
+
   const text = contentText(message.content);
   const asksVision = /\b(foto|gambar|image|vision|lihat|analisis|jelaskan isi|baca gambar)\b/i.test(text);
   const imageUrl = extractUrls(text).find(looksLikeImageUrl);
-  if (!asksVision || !imageUrl) return { body: { ...body, messages }, attached: false };
-  message.content = [{ type: "text", text }, { type: "image_url", image_url: { url: imageUrl, detail: "auto" } }];
+  if (!asksVision || !imageUrl) return { body: { ...body, model: MAX_MODEL_ID, messages }, attached: false };
+
+  message.content = [
+    { type: "text", text },
+    { type: "image_url", image_url: { url: imageUrl, detail: "auto" } }
+  ];
   messages[index] = message;
   return { body: { ...body, model: MAX_MODEL_ID, messages }, attached: true };
 }
@@ -132,25 +166,19 @@ function jakartaNow() {
   }).format(new Date());
 }
 
-function applyGonkaWebPlugin(body) {
+function applySearchAwareness(body) {
   const searchRequested = Boolean(body.agent_search ?? body.search ?? false);
   if (!searchRequested) return { body, plugin: null };
 
-  const requestedModel = body.model || PRO_MODEL_ID;
-  if (requestedModel !== PRO_MODEL_ID) return { body, plugin: null };
-
-  const existing = Array.isArray(body.plugins) ? body.plugins.filter((p) => p?.id !== "web") : [];
-  const directSearch = body.search === true;
-  const webPlugin = directSearch ? { id: "web" } : { id: "web", mode: "agent" };
   const messages = Array.isArray(body.messages) ? structuredClone(body.messages) : [];
   messages.unshift({
     role: "system",
-    content: `WAKTU SERVER NEXTURA: ${jakartaNow()} (Asia/Jakarta). Web search Gonka aktif untuk request ini. Gunakan hasil web terbaru dan kutipan/sumber yang diberikan gateway. Jangan mengatakan bahwa kamu tidak punya akses internet atau tidak tahu tanggal hari ini.`
+    content: `WAKTU SERVER NEXTURA: ${jakartaNow()} (Asia/Jakarta). Web search aktif untuk request ini. Gunakan konteks hasil pencarian terbaru yang diberikan sistem dan jangan mengatakan bahwa kamu tidak punya akses internet atau tidak tahu tanggal hari ini.`
   });
 
   return {
-    body: { ...body, messages, plugins: [...existing, webPlugin] },
-    plugin: directSearch ? "gonka_web" : "gonka_web_agent"
+    body: { ...body, model: MAX_MODEL_ID, messages },
+    plugin: "gonka_web"
   };
 }
 
@@ -162,6 +190,7 @@ function isPrivateIp(ip) {
   if (m && Number(m[1]) >= 16 && Number(m[1]) <= 31) return true;
   return /^(fc|fd|fe80)/i.test(ip);
 }
+
 async function validatePublicHttpUrl(value) {
   const url = new URL(value);
   if (!["https:", "http:"].includes(url.protocol)) throw new Error("Tool HTTP hanya menerima URL http/https.");
@@ -169,58 +198,99 @@ async function validatePublicHttpUrl(value) {
   if (!records.length || records.some((r) => isPrivateIp(r.address))) throw new Error("Alamat lokal/internal ditolak.");
   return url;
 }
-function wantsHttpTool(text = "") { return /\b(curl|request http|akses url|buka endpoint|tes endpoint|test endpoint|cek endpoint|panggil api|hit api)\b/i.test(text); }
+
+function wantsHttpTool(text = "") {
+  return /\b(curl|request http|akses url|buka endpoint|tes endpoint|test endpoint|cek endpoint|panggil api|hit api)\b/i.test(text);
+}
 
 async function runHttpTool(urlValue, incomingHeaders) {
   const url = await validatePublicHttpUrl(urlValue);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TOOL_TIMEOUT);
   const started = Date.now();
+
   try {
-    const headers = { "user-agent": "Nextura-HTTP-Tool/1.0", accept: "application/json,text/plain,text/html;q=0.8,*/*;q=0.5" };
+    const headers = {
+      "user-agent": "Nextura-HTTP-Tool/1.0",
+      accept: "application/json,text/plain,text/html;q=0.8,*/*;q=0.5"
+    };
     const incomingToken = tokenFromHeaders(incomingHeaders);
     if (incomingToken) headers.authorization = `Bearer ${incomingToken}`;
+
     const response = await fetch(url, { method: "GET", headers, redirect: "follow", signal: controller.signal });
     const reader = response.body?.getReader();
     let total = 0;
     const chunks = [];
+
     if (reader) {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         total += value.length;
         chunks.push(value);
-        if (total >= HTTP_TOOL_MAX_BYTES) { await reader.cancel(); break; }
+        if (total >= HTTP_TOOL_MAX_BYTES) {
+          await reader.cancel();
+          break;
+        }
       }
     }
+
     const raw = Buffer.concat(chunks.map((x) => Buffer.from(x))).toString("utf8").slice(0, HTTP_TOOL_MAX_BYTES);
-    return { ok: response.ok, status: response.status, final_url: response.url, content_type: response.headers.get("content-type") || "", latency_ms: Date.now() - started, body: raw };
-  } finally { clearTimeout(timer); }
+    return {
+      ok: response.ok,
+      status: response.status,
+      final_url: response.url,
+      content_type: response.headers.get("content-type") || "",
+      latency_ms: Date.now() - started,
+      body: raw
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function prepareChatBody(body, headers) {
   const vision = attachVisionUrl(body);
-  const web = applyGonkaWebPlugin(vision.body);
-  const next = web.body;
+  const search = applySearchAwareness(vision.body);
+  const next = search.body;
   const { message } = latestUserMessage(next.messages || []);
   const text = contentText(message?.content);
   const url = extractUrls(text)[0];
   let toolUsed = null;
+
   if (url && wantsHttpTool(text) && !looksLikeImageUrl(url)) {
     try {
       const result = await runHttpTool(url, headers);
-      next.messages = [{ role: "system", content: `HASIL TOOL HTTP NYATA — jangan mengaku tidak punya akses jaringan. Tool sudah menjalankan GET ke URL yang diminta. Jelaskan hasil aktual berikut secara ringkas dan akurat.\n${JSON.stringify(result)}` }, ...(next.messages || [])];
+      next.messages = [
+        { role: "system", content: `HASIL TOOL HTTP NYATA — jangan mengaku tidak punya akses jaringan. Tool sudah menjalankan GET ke URL yang diminta. Jelaskan hasil aktual berikut secara ringkas dan akurat.\n${JSON.stringify(result)}` },
+        ...(next.messages || [])
+      ];
       toolUsed = "http_get";
     } catch (error) {
-      next.messages = [{ role: "system", content: `TOOL HTTP SUDAH DICOBA tetapi gagal. Jangan mengaku tool tidak tersedia. Jelaskan kegagalan aktual ini: ${error.message}` }, ...(next.messages || [])];
+      next.messages = [
+        { role: "system", content: `TOOL HTTP SUDAH DICOBA tetapi gagal. Jangan mengaku tool tidak tersedia. Jelaskan kegagalan aktual ini: ${error.message}` },
+        ...(next.messages || [])
+      ];
       toolUsed = "http_get_failed";
     }
   }
-  return { body: next, toolUsed, visionAttached: vision.attached, searchPlugin: web.plugin };
+
+  return {
+    body: { ...next, model: MAX_MODEL_ID },
+    toolUsed,
+    visionAttached: vision.attached,
+    searchPlugin: search.plugin
+  };
 }
 
 function proxyRaw(req, res, port) {
-  const upstream = http.request({ hostname: "127.0.0.1", port, path: req.url, method: req.method, headers: { ...req.headers, host: `127.0.0.1:${port}` } }, (upstreamRes) => {
+  const upstream = http.request({
+    hostname: "127.0.0.1",
+    port,
+    path: req.url,
+    method: req.method,
+    headers: { ...req.headers, host: `127.0.0.1:${port}` }
+  }, (upstreamRes) => {
     res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
     upstreamRes.pipe(res);
   });
@@ -235,11 +305,24 @@ function proxyRouter(req, res, preparedBody = null, toolMeta = {}) {
     headers["content-length"] = Buffer.byteLength(preparedBody);
     delete headers["transfer-encoding"];
   }
-  const upstream = http.request({ hostname: "127.0.0.1", port: INTERNAL_PORT, path: req.url, method: req.method, headers }, (upstreamRes) => {
+
+  const upstream = http.request({
+    hostname: "127.0.0.1",
+    port: INTERNAL_PORT,
+    path: req.url,
+    method: req.method,
+    headers
+  }, (upstreamRes) => {
     const contentType = String(upstreamRes.headers["content-type"] || "");
     const pathname = new URL(req.url || "/", "http://localhost").pathname;
     const shouldRewrite = req.method === "POST" && pathname === "/v1/chat/completions" && contentType.includes("application/json") && (upstreamRes.statusCode || 500) >= 200 && (upstreamRes.statusCode || 500) < 300;
-    if (!shouldRewrite) { res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers); upstreamRes.pipe(res); return; }
+
+    if (!shouldRewrite) {
+      res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
+      upstreamRes.pipe(res);
+      return;
+    }
+
     const chunks = [];
     upstreamRes.on("data", (chunk) => chunks.push(chunk));
     upstreamRes.on("end", () => {
@@ -251,16 +334,34 @@ function proxyRouter(req, res, preparedBody = null, toolMeta = {}) {
           vision_url: Boolean(toolMeta.visionAttached),
           search_plugin: toolMeta.searchPlugin || null
         };
+
         const body = JSON.stringify(toNexturaJson(parsed));
-        const outHeaders = { ...upstreamRes.headers, "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body), "x-nextura-schema": "nextura.chat.v1" };
+        const outHeaders = {
+          ...upstreamRes.headers,
+          "content-type": "application/json; charset=utf-8",
+          "content-length": Buffer.byteLength(body),
+          "x-nextura-schema": "nextura.chat.v1"
+        };
         delete outHeaders["transfer-encoding"];
         res.writeHead(upstreamRes.statusCode || 200, outHeaders);
         res.end(body);
-      } catch { sendJson(res, 502, { error: { message: "Gagal membentuk JSON Nextura.", type: "nextura_gateway_error", code: "json_transform_failed" } }); }
+      } catch {
+        sendJson(res, 502, { error: { message: "Gagal membentuk JSON Nextura.", type: "nextura_gateway_error", code: "json_transform_failed" } });
+      }
     });
   });
-  upstream.on("error", (error) => sendJson(res, 502, { error: { message: "Nextura router belum siap atau tidak dapat dihubungi.", type: "nextura_gateway_error", code: "router_unavailable", detail: error.message } }));
-  if (preparedBody) upstream.end(preparedBody); else req.pipe(upstream);
+
+  upstream.on("error", (error) => sendJson(res, 502, {
+    error: {
+      message: "Nextura router belum siap atau tidak dapat dihubungi.",
+      type: "nextura_gateway_error",
+      code: "router_unavailable",
+      detail: error.message
+    }
+  }));
+
+  if (preparedBody) upstream.end(preparedBody);
+  else req.pipe(upstream);
 }
 
 async function handleChat(req, res) {
@@ -272,11 +373,14 @@ async function handleChat(req, res) {
       if (size > MAX_PROXY_BODY) throw new Error("Payload terlalu besar.");
       chunks.push(chunk);
     }
+
     const raw = Buffer.concat(chunks).toString("utf8");
     const input = raw ? JSON.parse(raw) : {};
     const prepared = await prepareChatBody(input, req.headers);
     proxyRouter(req, res, JSON.stringify(prepared.body), prepared);
-  } catch (error) { sendJson(res, 400, { error: { message: error.message || "Payload chat tidak valid.", code: "chat_prepare_failed" } }); }
+  } catch (error) {
+    sendJson(res, 400, { error: { message: error.message || "Payload chat tidak valid.", code: "chat_prepare_failed" } });
+  }
 }
 
 const server = http.createServer((req, res) => {
@@ -291,9 +395,12 @@ server.headersTimeout = server.keepAliveTimeout + 5_000;
 
 function shutdown(signal) {
   console.log(`[nextura-json] Shutdown ${signal}`);
-  server.close(() => { for (const child of [routerChild, toolChild]) if (!child.killed) child.kill("SIGTERM"); });
+  server.close(() => {
+    for (const child of [routerChild, toolChild]) if (!child.killed) child.kill("SIGTERM");
+  });
   setTimeout(() => process.exit(0), 10_000).unref();
 }
+
 process.once("SIGTERM", () => shutdown("SIGTERM"));
 process.once("SIGINT", () => shutdown("SIGINT"));
 
@@ -302,5 +409,5 @@ server.listen(PUBLIC_PORT, HOST, () => {
   console.log(`[nextura-json] Koyeb router internal di http://127.0.0.1:${INTERNAL_PORT}`);
   console.log(`[nextura-json] AI router internal di http://127.0.0.1:${ROUTER_PORT}`);
   console.log(`[nextura-json] Terminal tool internal di http://127.0.0.1:${TOOL_PORT}`);
-  console.log("[nextura-json] HTTP tool, Gonka web plugin, time awareness, thinking levels, dan vision URL aktif pada /v1/chat/completions");
+  console.log(`[nextura-json] Model publik tunggal: ${MAX_MODEL_ID}`);
 });
