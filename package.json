@@ -1,15 +1,17 @@
 {
   "name": "nextura-ai-router-koyeb",
-  "version": "2.3.0",
-  "description": "Nextura AI Router untuk Koyeb dengan JSON Nextura, Gonka, CometAPI, Agent Search, dan multi uptime",
+  "version": "2.7.0",
+  "description": "Nextura AI Router untuk Koyeb dengan Cortexa Max, thinking levels, web search, vision, dan Nextura Sandbox Terminal",
   "type": "module",
-  "main": "nextura-gateway.js",
+  "main": "terminal-agent.js",
   "scripts": {
-    "start": "node nextura-gateway.js",
+    "start": "node terminal-agent.js",
+    "start:gateway": "node nextura-gateway.js",
     "start:koyeb": "node koyeb.js",
     "start:router": "node server.js",
-    "dev": "node --watch nextura-gateway.js",
-    "check": "node --check nextura-gateway.js && node --check koyeb.js && node --check server.js"
+    "start:terminal": "node terminal-tool.js",
+    "dev": "node --watch terminal-agent.js",
+    "check": "node --check terminal-agent.js && node --check nextura-gateway.js && node --check terminal-tool.js && node --check koyeb.js && node --check server.js"
   },
   "engines": {
     "node": ">=22"
