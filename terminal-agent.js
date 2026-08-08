@@ -6,6 +6,7 @@ const HOST = process.env.HOST || "0.0.0.0";
 const GATEWAY_PORT = Number(process.env.NEXTURA_GATEWAY_PORT || (PUBLIC_PORT === 8000 ? 8010 : PUBLIC_PORT + 10));
 const MAX_BODY = Number(process.env.BODY_LIMIT_BYTES || 10 * 1024 * 1024);
 const TOOL_ENABLED = String(process.env.ENABLE_TERMINAL_TOOL || "false").toLowerCase() === "true";
+const TOOL_KEY = process.env.NEXTURA_TOOL_KEY || process.env.NEXTURA_API_KEY || "";
 const MAX_ACTIONS = Math.max(1, Math.min(Number(process.env.TERMINAL_AGENT_MAX_ACTIONS || 4), 6));
 
 const child = spawn(process.execPath, ["nextura-gateway.js"], {
@@ -131,10 +132,19 @@ async function planTerminal(input, headers) {
   return normalizePlan(extractJson(content));
 }
 
-async function executeSandbox(actions, headers) {
+function toolHeaders() {
+  return {
+    authorization: `Bearer ${TOOL_KEY}`,
+    "content-type": "application/json"
+  };
+}
+
+async function executeSandbox(actions) {
   const results = [];
+  if (!TOOL_KEY) return [{ action: "sandbox", status: 503, result: { error: { message: "NEXTURA_TOOL_KEY belum dikonfigurasi." } } }];
+
   for (const action of actions) {
-    const response = await requestInternal("/v1/tools/sandbox", "POST", headers, JSON.stringify(action));
+    const response = await requestInternal("/v1/tools/sandbox", "POST", toolHeaders(), JSON.stringify(action));
     let data;
     try { data = JSON.parse(response.body); } catch { data = { raw: response.body.slice(0, 20000) }; }
     results.push({ action: action.action, request: { path: action.path }, status: response.status, result: data });
@@ -162,7 +172,7 @@ async function handleChat(req, res) {
       return proxy(req, res, JSON.stringify({ ...input, messages }));
     }
 
-    const results = await executeSandbox(actions, req.headers);
+    const results = await executeSandbox(actions);
     const toolContext = {
       service: "Nextura Sandbox Terminal",
       sandboxed: true,
