@@ -12,6 +12,8 @@ const TOOL_PORT = Number(process.env.TOOL_INTERNAL_PORT || ROUTER_PORT + 1);
 const MAX_PROXY_BODY = Number(process.env.BODY_LIMIT_BYTES || 10 * 1024 * 1024);
 const HTTP_TOOL_TIMEOUT = Number(process.env.HTTP_TOOL_TIMEOUT_MS || 30_000);
 const HTTP_TOOL_MAX_BYTES = Number(process.env.HTTP_TOOL_MAX_BYTES || 30_000);
+const WEB_READER_MAX_PAGES = Math.max(1, Math.min(Number(process.env.WEB_READER_MAX_PAGES || 4), 6));
+const WEB_READER_MAX_CHARS = Math.max(8000, Math.min(Number(process.env.WEB_READER_MAX_CHARS || 50000), 120000));
 
 const AI_NAME = process.env.NEXTURA_AI_NAME || "Nextura AI";
 const MODEL_FAMILY = process.env.NEXTURA_MODEL_FAMILY || "Nextura Cortexa";
@@ -120,6 +122,20 @@ function extractUrls(text = "") {
     .map((m) => m[0].replace(/[.,;:!?]+$/, ""));
 }
 
+function extractBareDomains(text = "") {
+  const cleaned = String(text).replace(/https?:\/\/[^\s<>"')\]]+/gi, " ");
+  const matches = [...cleaned.matchAll(/\b(?:www\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:\/[a-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*)?/gi)];
+  return matches.map((m) => m[0].replace(/[.,;:!?]+$/, ""));
+}
+
+function webTargetFromText(text = "") {
+  const full = extractUrls(text)[0];
+  if (full) return full;
+  const bare = extractBareDomains(text)[0];
+  if (!bare) return null;
+  return `https://${bare}`;
+}
+
 function looksLikeImageUrl(value = "") {
   try {
     const url = new URL(value);
@@ -203,7 +219,11 @@ function wantsHttpTool(text = "") {
   return /\b(curl|request http|akses url|buka endpoint|tes endpoint|test endpoint|cek endpoint|panggil api|hit api)\b/i.test(text);
 }
 
-async function runHttpTool(urlValue, incomingHeaders) {
+function wantsWebReader(text = "") {
+  return /\b(cek|check|buka|open|baca|read|lihat|kunjungi|visit|akses|access|pelajari|ringkas|rangkum|analisis|dokumentasi|documentation|docs|website|web|situs|site|halaman|page|api reference|getting started|guide|panduan)\b/i.test(text);
+}
+
+async function runHttpTool(urlValue, incomingHeaders, options = {}) {
   const url = await validatePublicHttpUrl(urlValue);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TOOL_TIMEOUT);
@@ -211,11 +231,13 @@ async function runHttpTool(urlValue, incomingHeaders) {
 
   try {
     const headers = {
-      "user-agent": "Nextura-HTTP-Tool/1.0",
-      accept: "application/json,text/plain,text/html;q=0.8,*/*;q=0.5"
+      "user-agent": options.userAgent || "Nextura-Web-Reader/1.0",
+      accept: options.accept || "application/json,text/plain,text/html;q=0.9,*/*;q=0.5"
     };
-    const incomingToken = tokenFromHeaders(incomingHeaders);
-    if (incomingToken) headers.authorization = `Bearer ${incomingToken}`;
+    if (options.forwardAuthorization === true) {
+      const incomingToken = tokenFromHeaders(incomingHeaders);
+      if (incomingToken) headers.authorization = `Bearer ${incomingToken}`;
+    }
 
     const response = await fetch(url, { method: "GET", headers, redirect: "follow", signal: controller.signal });
     const reader = response.body?.getReader();
@@ -249,18 +271,129 @@ async function runHttpTool(urlValue, incomingHeaders) {
   }
 }
 
+function decodeHtmlEntities(text = "") {
+  return String(text)
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+}
+
+function htmlToReadableText(html = "") {
+  return decodeHtmlEntities(String(html)
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<(?:br|\/p|\/div|\/li|\/h[1-6]|\/tr|\/section|\/article)>/gi, "\n")
+    .replace(/<[^>]+>/g, " "))
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n\s*\n+/g, "\n")
+    .trim();
+}
+
+function extractSameOriginLinks(baseValue, html = "") {
+  let base;
+  try { base = new URL(baseValue); } catch { return []; }
+  const out = [];
+  const seen = new Set();
+  const priority = /(?:docs?|documentation|api|reference|guide|getting[-_ ]?started|quickstart|tutorial|developer|usage|auth|endpoint|sdk)/i;
+
+  for (const match of String(html).matchAll(/<a\b[^>]*href\s*=\s*["']([^"'#]+)["'][^>]*>/gi)) {
+    try {
+      const url = new URL(match[1], base);
+      if (url.origin !== base.origin) continue;
+      if (!["http:", "https:"].includes(url.protocol)) continue;
+      url.hash = "";
+      const href = url.toString();
+      if (seen.has(href) || href === base.toString()) continue;
+      seen.add(href);
+      out.push({ url: href, score: priority.test(url.pathname + url.search) ? 1 : 0 });
+    } catch {}
+  }
+
+  return out.sort((a, b) => b.score - a.score).map((x) => x.url);
+}
+
+async function runWebReader(target, incomingHeaders) {
+  const first = await runHttpTool(target, incomingHeaders, { forwardAuthorization: false, userAgent: "Nextura-Web-Reader/1.0" });
+  const pages = [];
+  const firstHtml = /text\/html|application\/xhtml\+xml/i.test(first.content_type);
+  pages.push({
+    url: first.final_url,
+    status: first.status,
+    content_type: first.content_type,
+    text: firstHtml ? htmlToReadableText(first.body) : first.body
+  });
+
+  if (first.ok && firstHtml && WEB_READER_MAX_PAGES > 1) {
+    const links = extractSameOriginLinks(first.final_url, first.body).slice(0, WEB_READER_MAX_PAGES - 1);
+    for (const link of links) {
+      try {
+        const page = await runHttpTool(link, incomingHeaders, { forwardAuthorization: false, userAgent: "Nextura-Web-Reader/1.0" });
+        const isHtml = /text\/html|application\/xhtml\+xml/i.test(page.content_type);
+        pages.push({
+          url: page.final_url,
+          status: page.status,
+          content_type: page.content_type,
+          text: isHtml ? htmlToReadableText(page.body) : page.body
+        });
+      } catch (error) {
+        pages.push({ url: link, status: 0, content_type: "", text: `Gagal dibaca: ${error.message}` });
+      }
+    }
+  }
+
+  let used = 0;
+  const compactPages = pages.map((page) => {
+    const remaining = Math.max(0, WEB_READER_MAX_CHARS - used);
+    const text = String(page.text || "").slice(0, remaining);
+    used += text.length;
+    return { ...page, text };
+  }).filter((page) => page.text || page.status);
+
+  return {
+    target,
+    pages_read: compactPages.length,
+    pages: compactPages
+  };
+}
+
 async function prepareChatBody(body, headers) {
   const vision = attachVisionUrl(body);
   const search = applySearchAwareness(vision.body);
   const next = search.body;
   const { message } = latestUserMessage(next.messages || []);
   const text = contentText(message?.content);
-  const url = extractUrls(text)[0];
+  const target = webTargetFromText(text);
   let toolUsed = null;
 
-  if (url && wantsHttpTool(text) && !looksLikeImageUrl(url)) {
+  if (target && wantsWebReader(text) && !looksLikeImageUrl(target)) {
     try {
-      const result = await runHttpTool(url, headers);
+      const result = await runWebReader(target, headers);
+      next.messages = [
+        {
+          role: "system",
+          content: `NEXTURA WEB READER SUDAH MEMBUKA WEBSITE SECARA NYATA. Jangan meminta user memberi tautan lagi dan jangan mengaku belum membuka web. Jawab langsung berdasarkan isi halaman aktual berikut. Jika beberapa halaman terbaca, gabungkan informasinya. Jangan mengarang hal yang tidak ada di halaman.\n${JSON.stringify(result)}`
+        },
+        ...(next.messages || [])
+      ];
+      toolUsed = "web_reader";
+    } catch (error) {
+      next.messages = [
+        { role: "system", content: `NEXTURA WEB READER sudah mencoba membuka ${target}, tetapi gagal secara nyata: ${error.message}. Jelaskan kegagalan aktual ini; jangan mengatakan bahwa kamu tidak punya kemampuan membuka web.` },
+        ...(next.messages || [])
+      ];
+      toolUsed = "web_reader_failed";
+    }
+  } else if (target && wantsHttpTool(text) && !looksLikeImageUrl(target)) {
+    try {
+      const result = await runHttpTool(target, headers, { forwardAuthorization: true, userAgent: "Nextura-HTTP-Tool/1.0" });
       next.messages = [
         { role: "system", content: `HASIL TOOL HTTP NYATA — jangan mengaku tidak punya akses jaringan. Tool sudah menjalankan GET ke URL yang diminta. Jelaskan hasil aktual berikut secara ringkas dan akurat.\n${JSON.stringify(result)}` },
         ...(next.messages || [])
