@@ -1,7 +1,7 @@
 {
   "name": "nextura-ai-router-koyeb",
-  "version": "2.8.0",
-  "description": "Nextura AI Router untuk Koyeb dengan OpenAI SDK, Anthropic SDK, Nextura SDK, Cortexa Max, thinking, web, vision, sandbox terminal, typo detection, dan public location resolver",
+  "version": "2.9.0",
+  "description": "Nextura AI Router untuk Koyeb dengan OpenAI SDK, Anthropic SDK, Nextura SDK, Cortexa Max, thinking, web, vision, sandbox terminal, PDF, download, web screenshot, typo detection, dan public location resolver",
   "type": "module",
   "main": "location-bootstrap.js",
   "scripts": {
@@ -12,7 +12,7 @@
     "start:router": "node server.js",
     "start:terminal": "node terminal-tool.js",
     "dev": "node --watch location-bootstrap.js",
-    "check": "node --check location-bootstrap.js && node --check sdk-compat.js && node --check sdk/nextura.js && node --check terminal-agent.js && node --check nextura-gateway.js && node --check terminal-tool.js && node --check koyeb.js && node --check server.js"
+    "check": "node --check location-bootstrap.js && node --check sdk-compat.js && node --check sdk/nextura.js && node --check terminal-agent.js && node --check terminal-agent-v2.js && node --check nextura-gateway.js && node --check terminal-tool.js && node --check terminal-tool-v2.js && node --check sandbox-artifacts.js && node --check koyeb.js && node --check server.js"
   },
   "engines": {
     "node": ">=22"
@@ -20,6 +20,8 @@
   "dependencies": {
     "@fastify/cors": "^10.0.1",
     "@fastify/rate-limit": "^10.2.1",
-    "fastify": "^5.2.1"
+    "fastify": "^5.2.1",
+    "pdf-lib": "^1.17.1",
+    "puppeteer-core": "^24.16.0"
   }
 }
