@@ -74,6 +74,7 @@ function toNexturaJson(data = {}) {
       developer: sourceMeta.developer || DEVELOPER,
       company: COMPANY,
       agent_search: Boolean(sourceMeta.agent_search),
+      search_plugin: sourceMeta.search_plugin || null,
       identity_enforced: sourceMeta.identity_enforced !== false,
       deep_thinking: Boolean(sourceMeta.deep_thinking),
       thinking_visible: Boolean(sourceMeta.thinking_visible),
@@ -112,6 +113,43 @@ function attachVisionUrl(body) {
   message.content = [{ type: "text", text }, { type: "image_url", image_url: { url: imageUrl, detail: "auto" } }];
   messages[index] = message;
   return { body: { ...body, model: MAX_MODEL_ID, messages }, attached: true };
+}
+
+function jakartaNow() {
+  return new Intl.DateTimeFormat("id-ID", {
+    timeZone: "Asia/Jakarta",
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZoneName: "short"
+  }).format(new Date());
+}
+
+function applyGonkaWebPlugin(body) {
+  const searchRequested = Boolean(body.agent_search ?? body.search ?? false);
+  if (!searchRequested) return { body, plugin: null };
+
+  const requestedModel = body.model || PRO_MODEL_ID;
+  if (requestedModel !== PRO_MODEL_ID) return { body, plugin: null };
+
+  const existing = Array.isArray(body.plugins) ? body.plugins.filter((p) => p?.id !== "web") : [];
+  const directSearch = body.search === true;
+  const webPlugin = directSearch ? { id: "web" } : { id: "web", mode: "agent" };
+  const messages = Array.isArray(body.messages) ? structuredClone(body.messages) : [];
+  messages.unshift({
+    role: "system",
+    content: `WAKTU SERVER NEXTURA: ${jakartaNow()} (Asia/Jakarta). Web search Gonka aktif untuk request ini. Gunakan hasil web terbaru dan kutipan/sumber yang diberikan gateway. Jangan mengatakan bahwa kamu tidak punya akses internet atau tidak tahu tanggal hari ini.`
+  });
+
+  return {
+    body: { ...body, messages, plugins: [...existing, webPlugin] },
+    plugin: directSearch ? "gonka_web" : "gonka_web_agent"
+  };
 }
 
 function isPrivateIp(ip) {
@@ -160,7 +198,8 @@ async function runHttpTool(urlValue, incomingHeaders) {
 
 async function prepareChatBody(body, headers) {
   const vision = attachVisionUrl(body);
-  const next = vision.body;
+  const web = applyGonkaWebPlugin(vision.body);
+  const next = web.body;
   const { message } = latestUserMessage(next.messages || []);
   const text = contentText(message?.content);
   const url = extractUrls(text)[0];
@@ -175,7 +214,7 @@ async function prepareChatBody(body, headers) {
       toolUsed = "http_get_failed";
     }
   }
-  return { body: next, toolUsed, visionAttached: vision.attached };
+  return { body: next, toolUsed, visionAttached: vision.attached, searchPlugin: web.plugin };
 }
 
 function proxyRaw(req, res, port) {
@@ -204,7 +243,12 @@ function proxyRouter(req, res, preparedBody = null, toolMeta = {}) {
     upstreamRes.on("end", () => {
       try {
         const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        parsed.x_nextura = { ...(parsed.x_nextura || {}), tool_used: toolMeta.toolUsed || null, vision_url: Boolean(toolMeta.visionAttached) };
+        parsed.x_nextura = {
+          ...(parsed.x_nextura || {}),
+          tool_used: toolMeta.toolUsed || null,
+          vision_url: Boolean(toolMeta.visionAttached),
+          search_plugin: toolMeta.searchPlugin || null
+        };
         const body = JSON.stringify(toNexturaJson(parsed));
         const outHeaders = { ...upstreamRes.headers, "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body), "x-nextura-schema": "nextura.chat.v1" };
         delete outHeaders["transfer-encoding"];
@@ -256,5 +300,5 @@ server.listen(PUBLIC_PORT, HOST, () => {
   console.log(`[nextura-json] Koyeb router internal di http://127.0.0.1:${INTERNAL_PORT}`);
   console.log(`[nextura-json] AI router internal di http://127.0.0.1:${ROUTER_PORT}`);
   console.log(`[nextura-json] Terminal tool internal di http://127.0.0.1:${TOOL_PORT}`);
-  console.log("[nextura-json] HTTP tool dan vision URL aktif pada /v1/chat/completions");
+  console.log("[nextura-json] HTTP tool, Gonka web plugin, time awareness, dan vision URL aktif pada /v1/chat/completions");
 });
