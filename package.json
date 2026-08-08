@@ -1,17 +1,18 @@
 {
   "name": "nextura-ai-router-koyeb",
-  "version": "2.7.1",
-  "description": "Nextura AI Router untuk Koyeb dengan Cortexa Max, thinking levels, web search, vision, Nextura Sandbox Terminal, dan public location resolver",
+  "version": "2.8.0",
+  "description": "Nextura AI Router untuk Koyeb dengan OpenAI SDK, Anthropic SDK, Nextura SDK, Cortexa Max, thinking, web, vision, sandbox terminal, typo detection, dan public location resolver",
   "type": "module",
   "main": "location-bootstrap.js",
   "scripts": {
     "start": "node location-bootstrap.js",
+    "start:sdk": "node sdk-compat.js",
     "start:gateway": "node nextura-gateway.js",
     "start:koyeb": "node koyeb.js",
     "start:router": "node server.js",
     "start:terminal": "node terminal-tool.js",
     "dev": "node --watch location-bootstrap.js",
-    "check": "node --check location-bootstrap.js && node --check terminal-agent.js && node --check nextura-gateway.js && node --check terminal-tool.js && node --check koyeb.js && node --check server.js"
+    "check": "node --check location-bootstrap.js && node --check sdk-compat.js && node --check sdk/nextura.js && node --check terminal-agent.js && node --check nextura-gateway.js && node --check terminal-tool.js && node --check koyeb.js && node --check server.js"
   },
   "engines": {
     "node": ">=22"
