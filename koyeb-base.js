@@ -1,12 +1,34 @@
 import http from "node:http";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
 const PUBLIC_PORT = Number(process.env.PORT || 8000);
 const HOST = process.env.HOST || "0.0.0.0";
 const INTERNAL_PORT = Number(process.env.INTERNAL_PORT || (PUBLIC_PORT === 8000 ? 8001 : 8000));
 const startedAt = Date.now();
 
-const child = spawn(process.execPath, ["server.js"], {
+function buildRuntimeRouter() {
+  const sourcePath = path.resolve("server.js");
+  const runtimePath = path.resolve("server-runtime.js");
+  let source = fs.readFileSync(sourcePath, "utf8");
+
+  // IMPORTANT: jangan pernah trim delta SSE. Leading space pada token adalah bagian dari output.
+  const oldChunkRewrite = 'if (choice?.delta?.content) choice.delta.content = redactUpstreamNames(stripReasoning(choice.delta.content));';
+  const newChunkRewrite = 'if (choice?.delta?.content) choice.delta.content = String(choice.delta.content).replace(/MiniMaxAI\\/MiniMax-M2\\.7/gi, CONFIG.maxModelName).replace(/\\bMiniMax\\b/gi, CONFIG.aiName).replace(/\\bGonka\\b/gi, CONFIG.company).replace(/\\bCometAPI\\b/gi, CONFIG.company);';
+  if (source.includes(oldChunkRewrite)) source = source.replace(oldChunkRewrite, newChunkRewrite);
+
+  // Upstream [DONE] tidak diteruskan; router mengirim satu [DONE] final sendiri.
+  const oldDone = 'if (!payload || payload === "[DONE]") return line;';
+  const newDone = 'if (!payload) return line;\n  if (payload === "[DONE]") return "";';
+  if (source.includes(oldDone)) source = source.replace(oldDone, newDone);
+
+  fs.writeFileSync(runtimePath, source, "utf8");
+  return runtimePath;
+}
+
+const runtimeRouter = buildRuntimeRouter();
+const child = spawn(process.execPath, [runtimeRouter], {
   env: { ...process.env, PORT: String(INTERNAL_PORT), HOST: "127.0.0.1" },
   stdio: "inherit"
 });
@@ -18,7 +40,7 @@ child.on("exit", (code, signal) => {
 
 function uptimeSeconds() { return Math.floor((Date.now() - startedAt) / 1000); }
 function uptimePayload(channel) {
-  return { ok: true, service: "Nextura AI Router", channel, platform: process.env.KOYEB_APP_NAME ? "Koyeb" : "Node.js", uptime_seconds: uptimeSeconds(), timestamp: new Date().toISOString() };
+  return { ok: true, service: "Nextura AI Router", channel, platform: process.env.KOYEB_APP_NAME ? "Koyeb" : "Node.js", uptime_seconds: uptimeSeconds(), timestamp: new Date().toISOString(), sse_whitespace_fix: true };
 }
 function uptimeHtml(channel, intervalSeconds) {
   const safeChannel = String(channel).replace(/[^a-zA-Z0-9_-]/g, "");
@@ -61,4 +83,4 @@ server.headersTimeout = server.keepAliveTimeout + 5_000;
 function shutdown(signal) { console.log(`[koyeb-base] Shutdown ${signal}`); server.close(() => { if (!child.killed) child.kill("SIGTERM"); }); setTimeout(() => process.exit(0), 10_000).unref(); }
 process.once("SIGTERM", () => shutdown("SIGTERM"));
 process.once("SIGINT", () => shutdown("SIGINT"));
-server.listen(PUBLIC_PORT, HOST, () => { console.log(`[koyeb-base] Gateway online di http://${HOST}:${PUBLIC_PORT}`); console.log(`[koyeb-base] Router internal di http://127.0.0.1:${INTERNAL_PORT}`); });
+server.listen(PUBLIC_PORT, HOST, () => { console.log(`[koyeb-base] Gateway online di http://${HOST}:${PUBLIC_PORT}`); console.log(`[koyeb-base] Router internal di http://127.0.0.1:${INTERNAL_PORT}`); console.log(`[koyeb-base] SSE whitespace preservation fix active`); });
