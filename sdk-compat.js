@@ -91,8 +91,8 @@ const server = http.createServer(async (req, res) => {
       if (req.method === "DELETE") { if (fs.existsSync(target)) fs.unlinkSync(target); return send(res, 200, { ok: true, name: safe }); }
     }
 
-    const healthMatch = p.match(/^\/health(?:\/?([123]))?$/); if (req.method === "GET" && healthMatch) return send(res, 200, healthPayload(healthMatch[1] ? Number(healthMatch[1]) : null));
-    const uptimeMatch = p.match(/^\/uptime(?:\/?([123]))?$/); if (req.method === "GET" && uptimeMatch) return send(res, 200, uptimePayload(uptimeMatch[1] ? Number(uptimeMatch[1]) : null));
+    const healthMatch = p.match(/^\/health(?:[-\/]?([123]))?$/); if (req.method === "GET" && healthMatch) return send(res, 200, healthPayload(healthMatch[1] ? Number(healthMatch[1]) : null));
+    const uptimeMatch = p.match(/^\/uptime(?:[-\/]?([123]))?$/); if (req.method === "GET" && uptimeMatch) return send(res, 200, uptimePayload(uptimeMatch[1] ? Number(uptimeMatch[1]) : null));
     if (req.method === "GET" && p === "/ping") return send(res, 200, healthPayload());
     return send(res, 404, { error: "Endpoint tidak ditemukan." });
   } catch (error) { return send(res, 400, { error: error.message || String(error) }); }
