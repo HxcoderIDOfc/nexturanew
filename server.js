@@ -87,13 +87,14 @@ function normalizeThinkingLevel(value, fallback = "cepat") {
 function resolveThinking(body = {}) {
   let level = normalizeThinkingLevel(CONFIG.defaultThinkingLevel, "cepat");
   let show = false;
-  if (typeof body.thinking_level === "string") level = normalizeThinkingLevel(body.thinking_level, level);
+  const hasExplicitLevel = typeof body.thinking_level === "string" && body.thinking_level.trim() !== "";
+  if (hasExplicitLevel) level = normalizeThinkingLevel(body.thinking_level, level);
   if (typeof body.thinking === "string") level = normalizeThinkingLevel(body.thinking, level);
   else if (body.thinking && typeof body.thinking === "object") {
     if (typeof body.thinking.level === "string") level = normalizeThinkingLevel(body.thinking.level, level);
     show = body.thinking.show === true;
   }
-  if (body.thinking === false || body?.thinking?.enabled === false) level = "cepat";
+  if (!hasExplicitLevel && (body.thinking === false || body?.thinking?.enabled === false)) level = "cepat";
   const reviewPasses = level === "super" ? 3 : level === "tinggi" ? 2 : level === "sedang" ? 1 : 0;
   return { enabled: true, show, level, reviewPasses };
 }
