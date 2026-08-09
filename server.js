@@ -15,7 +15,7 @@ const CONFIG = {
   port: Number(process.env.PORT || 8000),
   host: process.env.HOST || "0.0.0.0",
   publicKey: process.env.NEXTURA_API_KEY || "",
-  aiName: process.env.NEXTURA_AI_NAME || "Nextura AI",
+  aiName: "Cortexa Max",
   modelFamily: process.env.NEXTURA_MODEL_FAMILY || "Nextura Cortexa",
   developer: process.env.NEXTURA_DEVELOPER || "Nextura",
   company: process.env.NEXTURA_COMPANY || "Nextura",
