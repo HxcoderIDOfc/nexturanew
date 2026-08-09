@@ -7,10 +7,12 @@ import makeWASocket, {
   useMultiFileAuthState
 } from "@whiskeysockets/baileys";
 import qrcode from "qrcode";
+import { pushConsoleLog } from "./live-console.js";
 
 const SESSION_DIR = path.resolve(process.env.WA_SESSION_DIR || "/tmp/nextura-wa-session");
 const PLUGIN_DIR = path.resolve(process.env.WA_PLUGIN_DIR || "./wa-plugins");
 const PLUGIN_RELOAD_MS = Number(process.env.WA_PLUGIN_RELOAD_MS || 5000);
+const AUTO_READ = String(process.env.WA_AUTO_READ || "true").toLowerCase() !== "false";
 
 const state = {
   status: "starting",
@@ -20,6 +22,7 @@ const state = {
   phone: null,
   pluginCount: 0,
   lastError: null,
+  autoRead: AUTO_READ,
   updatedAt: Date.now()
 };
 
@@ -30,6 +33,19 @@ let reconnectTimer = null;
 
 function setState(patch = {}) {
   Object.assign(state, patch, { updatedAt: Date.now() });
+}
+
+function getText(message) {
+  return message?.message?.conversation
+    || message?.message?.extendedTextMessage?.text
+    || message?.message?.imageMessage?.caption
+    || message?.message?.videoMessage?.caption
+    || message?.message?.documentMessage?.caption
+    || "";
+}
+
+function jidLabel(jid = "") {
+  return String(jid).replace(/@s\.whatsapp\.net$/i, "").replace(/@g\.us$/i, " [group]");
 }
 
 async function loadPlugins() {
@@ -46,12 +62,14 @@ async function loadPlugins() {
         if (typeof handler === "function") loaded.push({ name: file, handler });
       } catch (error) {
         console.error(`[wa-plugin] gagal load ${file}:`, error.message);
+        pushConsoleLog("plugin_error", { plugin: file, error: error.message });
       }
     }
     plugins = loaded;
     setState({ pluginCount: loaded.length });
   } catch (error) {
     console.error("[wa-plugin] loader error:", error.message);
+    pushConsoleLog("plugin_loader_error", { error: error.message });
   }
 }
 
@@ -59,9 +77,15 @@ async function dispatchPlugins(message) {
   if (!sock || !message?.message) return;
   for (const plugin of plugins) {
     try {
-      await plugin.handler({ sock, message, state: getWhatsAppState });
+      await plugin.handler({
+        sock,
+        message,
+        state: getWhatsAppState,
+        log: (type, payload = {}) => pushConsoleLog(type, { plugin: plugin.name, ...payload })
+      });
     } catch (error) {
       console.error(`[wa-plugin] ${plugin.name} error:`, error.message);
+      pushConsoleLog("plugin_error", { plugin: plugin.name, error: error.message });
     }
   }
 }
@@ -91,7 +115,25 @@ async function connectWhatsApp() {
 
     sock.ev.on("creds.update", saveCreds);
     sock.ev.on("messages.upsert", async ({ messages = [] }) => {
-      for (const message of messages) await dispatchPlugins(message);
+      for (const message of messages) {
+        if (!message?.message) continue;
+        const jid = message?.key?.remoteJid || "";
+        const text = String(getText(message)).trim();
+        const fromMe = Boolean(message?.key?.fromMe);
+        pushConsoleLog(fromMe ? "wa_out" : "wa_in", {
+          jid,
+          contact: jidLabel(jid),
+          text: text || `[${Object.keys(message.message || {})[0] || "message"}]`
+        });
+
+        if (AUTO_READ && !fromMe && message?.key) {
+          await sock.readMessages([message.key]).catch((error) => {
+            pushConsoleLog("read_error", { jid, error: error.message });
+          });
+        }
+
+        await dispatchPlugins(message);
+      }
     });
 
     sock.ev.on("connection.update", async (update) => {
@@ -100,6 +142,7 @@ async function connectWhatsApp() {
         let qrDataUrl = null;
         try { qrDataUrl = await qrcode.toDataURL(qr, { margin: 1, width: 340 }); } catch {}
         setState({ status: "qr", qr, qrDataUrl, lastError: null });
+        pushConsoleLog("connection", { status: "qr", text: "QR WhatsApp siap dipindai" });
       }
       if (connection === "open") {
         const id = sock?.user?.id || "";
@@ -111,6 +154,7 @@ async function connectWhatsApp() {
           phone: id.split(":")[0] || null,
           lastError: null
         });
+        pushConsoleLog("connection", { status: "connected", text: "WhatsApp terhubung" });
       }
       if (connection === "close") {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -121,11 +165,16 @@ async function connectWhatsApp() {
           qrDataUrl: null,
           lastError: lastDisconnect?.error?.message || null
         });
+        pushConsoleLog("connection", {
+          status: loggedOut ? "logged_out" : "disconnected",
+          text: lastDisconnect?.error?.message || "Koneksi WhatsApp terputus"
+        });
         if (!loggedOut) scheduleReconnect();
       }
     });
   } catch (error) {
     setState({ status: "error", lastError: error.message || String(error) });
+    pushConsoleLog("connection_error", { error: error.message || String(error) });
     scheduleReconnect();
   }
 }
@@ -138,6 +187,7 @@ export async function restartWhatsApp() {
   try { sock?.end?.(new Error("manual restart")); } catch {}
   sock = null;
   setState({ status: "restarting", qr: null, qrDataUrl: null });
+  pushConsoleLog("connection", { status: "restarting", text: "Restart koneksi manual" });
   await connectWhatsApp();
   return getWhatsAppState();
 }
@@ -147,6 +197,7 @@ export async function logoutWhatsApp() {
   try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch {}
   sock = null;
   setState({ status: "logged_out", qr: null, qrDataUrl: null, phone: null, connectedAt: null });
+  pushConsoleLog("connection", { status: "logged_out", text: "Session WhatsApp dihapus" });
   scheduleReconnect();
   return getWhatsAppState();
 }
