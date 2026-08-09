@@ -15,7 +15,7 @@ const HTTP_TOOL_MAX_BYTES = Number(process.env.HTTP_TOOL_MAX_BYTES || 30_000);
 const WEB_READER_MAX_PAGES = Math.max(1, Math.min(Number(process.env.WEB_READER_MAX_PAGES || 4), 6));
 const WEB_READER_MAX_CHARS = Math.max(8000, Math.min(Number(process.env.WEB_READER_MAX_CHARS || 50000), 120000));
 
-const AI_NAME = process.env.NEXTURA_AI_NAME || "Nextura AI";
+const AI_NAME = "Cortexa Max";
 const MODEL_FAMILY = process.env.NEXTURA_MODEL_FAMILY || "Nextura Cortexa";
 const DEVELOPER = process.env.NEXTURA_DEVELOPER || "Nextura";
 const COMPANY = process.env.NEXTURA_COMPANY || "Nextura";
