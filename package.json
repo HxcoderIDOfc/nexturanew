@@ -1,13 +1,13 @@
 {
   "name": "nextura-whatsapp-bot",
-  "version": "1.0.0",
-  "description": "Nextura WhatsApp bot dengan QR login, health/uptime endpoints, dan plugin autoload.",
+  "version": "1.1.0",
+  "description": "Nextura WhatsApp bot dengan QR login, persistent session path, plugin manager, plugin autoload, dan Nextura AI chat.",
   "type": "module",
-  "main": "sdk-compat.js",
+  "main": "start.js",
   "scripts": {
-    "start": "node sdk-compat.js",
-    "dev": "node --watch sdk-compat.js",
-    "check": "node --check sdk-compat.js && node --check whatsapp-bot.js && node --check wa-plugins/ping.js"
+    "start": "node start.js",
+    "dev": "node --watch start.js",
+    "check": "node --check start.js && node --check sdk-compat.js && node --check whatsapp-bot.js && node --check wa-plugins/ping.js && node --check wa-plugins/ai-chat.js"
   },
   "engines": {
     "node": ">=22"
