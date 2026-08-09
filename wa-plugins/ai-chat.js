@@ -20,9 +20,12 @@ async function resolveModel(baseUrl, apiKey, log) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || data?.message || `Gagal membaca model: HTTP ${response.status}`);
+
   const models = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
-  const model = String(models[0]?.id || models[0]?.name || "").trim();
-  if (!model) throw new Error("API Nextura tidak mengembalikan model yang bisa dipakai.");
+  const preferred = models.find((item) => item?.id && item?.object === "model") || models[0];
+  const model = String(preferred?.id || preferred?.name || "").trim();
+  if (!model) throw new Error("API Nextura tidak mengembalikan model. Isi NEXTURA_AI_MODEL di environment jika endpoint /v1/models tidak tersedia.");
+
   cachedModel = model;
   cachedAt = Date.now();
   log?.("ai_model", { model, text: `Model otomatis: ${model}` });
@@ -31,13 +34,20 @@ async function resolveModel(baseUrl, apiKey, log) {
 
 export default async function nexturaAiPlugin({ sock, message, log }) {
   const jid = message?.key?.remoteJid;
-  if (!jid || message?.key?.fromMe) return;
+  if (!jid || message?.key?.fromMe || jid === "status@broadcast") return;
 
   const raw = String(getText(message)).trim();
-  const match = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
-  if (!match) return;
+  if (!raw) return;
 
-  const prompt = match[1].trim();
+  const commandMatch = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
+  const autoReply = String(process.env.WA_AI_AUTO_REPLY || "true").toLowerCase() !== "false";
+
+  // Jangan berebut dengan plugin command lain.
+  if (!commandMatch && (!autoReply || raw.toLowerCase() === "ping" || raw.startsWith("."))) return;
+
+  const prompt = commandMatch ? commandMatch[1].trim() : raw;
+  if (!prompt) return;
+
   const apiKey = String(process.env.NEXTURA_AI_API_KEY || process.env.NEXTURA_API_KEY || "").trim();
   const baseUrl = String(process.env.NEXTURA_AI_BASE_URL || "https://api.nextura.my.id").replace(/\/+$/, "");
 
@@ -70,13 +80,15 @@ export default async function nexturaAiPlugin({ sock, message, log }) {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data?.error?.message || data?.message || `HTTP ${response.status}`);
 
-    const answer = String(data?.choices?.[0]?.message?.content || data?.message || "AI tidak mengembalikan jawaban.");
+    const answer = String(data?.choices?.[0]?.message?.content || data?.message || "").trim();
+    if (!answer) throw new Error("AI tidak mengembalikan isi jawaban.");
+
     log?.("ai_response", { jid, model: data?.model || model, text: answer });
     await sock.sendMessage(jid, { text: answer }, { quoted: message });
   } catch (error) {
     const errorText = error.message || String(error);
-    log?.("ai_error", { jid, error: errorText });
-    await sock.sendMessage(jid, { text: `AI error: ${errorText}` }, { quoted: message });
+    log?.("ai_error", { jid, error: errorText, text: prompt });
+    await sock.sendMessage(jid, { text: `AI error: ${errorText}` }, { quoted: message }).catch(() => {});
   } finally {
     await sock.sendPresenceUpdate("paused", jid).catch(() => {});
   }
