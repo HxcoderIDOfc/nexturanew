@@ -1,37 +1,43 @@
 # 📱 Nextura WhatsApp Bot
 
-Nextura sekarang merupakan runtime **WhatsApp Bot ringan berbasis Baileys** dengan halaman QR login, session persistence, Plugin Manager berbasis web, auto-load plugin, monitoring health/uptime, dan integrasi AI melalui **nextura.my.id**.
+Runtime WhatsApp Bot ringan berbasis **Baileys** dengan QR login, session persistent, auto-read, Plugin Manager, Live Console, auto-load plugin, health/uptime, dan integrasi AI melalui **Nextura API**.
 
-> Sistem AI gateway, terminal agent, sandbox, Max Engine, Puppeteer, PDF tools, dan runtime lama sudah tidak digunakan.
+> Runtime AI gateway, terminal agent, sandbox, Puppeteer, PDF tools, dan engine lama sudah tidak dipakai.
 
 ## ✨ Fitur
 
-- 📲 Login WhatsApp melalui QR di `/wa`
-- 💾 Session WhatsApp dapat disimpan secara persistent
+- 📲 QR WhatsApp di `/wa`
+- 💾 Session persistent lewat `WA_SESSION_DIR`
+- 👁️ Auto-read pesan masuk
 - 🧩 Auto-load plugin `.js` / `.mjs`
-- 📝 Upload, buat, edit, dan hapus plugin langsung dari browser
-- 🔐 Plugin Manager dilindungi `WA_ADMIN_KEY`
-- 🤖 AI Chat menggunakan `https://nextura.my.id`
-- 🔑 API key AI hanya dibaca dari environment
+- 📝 Upload, buat, edit, dan hapus plugin dari browser
+- 🖥️ Live Console untuk pesan masuk, balasan bot, request AI, response AI, dan error
+- 🔐 `/plugins` dan `/console` dilindungi `WA_ADMIN_KEY`
+- 🤖 AI Chat melalui `https://api.nextura.my.id`
+- 🔎 Model AI dapat dideteksi otomatis lewat `/v1/models`
 - ♻️ Auto reconnect WhatsApp
-- ❤️ Health endpoint 1–3 tetap tersedia
-- ⏱️ Uptime endpoint 1–3 tetap tersedia
-- 🟢 Plugin contoh `ping`
+- ❤️ Health 1–3 tetap tersedia
+- ⏱️ Uptime 1–3 tetap tersedia
 
 ## 🌐 Halaman & Endpoint
 
 ```text
 GET  /                  halaman utama
-GET  /wa                QR & status WhatsApp
-GET  /wa/status         status koneksi WhatsApp
-POST /wa/restart        restart koneksi WhatsApp
-POST /wa/logout         logout session WhatsApp
+GET  /wa                QR + status WhatsApp
+GET  /wa/status         status koneksi
+POST /wa/restart        restart koneksi
+POST /wa/logout         logout session
 
 GET  /plugins           Plugin Manager
-GET  /api/plugins       daftar plugin (admin)
-POST /api/plugins       buat/upload/edit plugin (admin)
-GET  /api/plugins/:name baca plugin (admin)
-DELETE /api/plugins/:name hapus plugin (admin)
+GET  /console           Live Console
+
+GET    /api/plugins
+POST   /api/plugins
+GET    /api/plugins/:name
+DELETE /api/plugins/:name
+
+GET    /api/console
+DELETE /api/console
 
 GET /health
 GET /health-1
@@ -54,110 +60,50 @@ GET /ping
 
 ## 🔐 Environment Variables
 
-Jangan simpan API key asli di GitHub. Masukkan secret melalui Environment Variables hosting.
+Jangan simpan API key asli di GitHub.
 
 ```env
 PORT=8000
 HOST=0.0.0.0
 
-# Plugin Manager
+# Admin panel
 WA_ADMIN_KEY=ganti-dengan-password-admin-yang-kuat
-WA_PLUGIN_DIR=./wa-plugins
-WA_PLUGIN_RELOAD_MS=5000
 
-# Session WhatsApp
+# WhatsApp
+WA_AUTO_READ=true
 WA_SESSION_DIR=/data/nextura-wa-session
+WA_PLUGIN_RELOAD_MS=5000
+WA_CONSOLE_MAX_LOGS=500
+
+# Opsional
+# WA_PLUGIN_DIR=/data/wa-plugins
 
 # Nextura AI
-NEXTURA_AI_BASE_URL=https://nextura.my.id
+NEXTURA_AI_BASE_URL=https://api.nextura.my.id
 NEXTURA_AI_API_KEY=masukkan-api-key-nextura
-NEXTURA_AI_MODEL=Nextura/cortexa-nexus2.7
+
+# Opsional. Kosong = auto baca /v1/models
+NEXTURA_AI_MODEL=
 NEXTURA_AI_TIMEOUT_MS=120000
-```
-
-`NEXTURA_AI_API_KEY` adalah pilihan utama. Plugin AI juga dapat membaca `NEXTURA_API_KEY` sebagai fallback.
-
-## 💾 Session WhatsApp Persistent
-
-Baileys menyimpan kredensial WhatsApp di folder `WA_SESSION_DIR`.
-
-Untuk hosting yang menyediakan persistent volume, mount volume misalnya ke:
-
-```text
-/data
-```
-
-kemudian gunakan:
-
-```env
-WA_SESSION_DIR=/data/nextura-wa-session
-```
-
-Dengan persistent storage, restart/redeploy aplikasi dapat menggunakan session yang sudah tersimpan sehingga QR tidak perlu dipindai setiap kali container restart.
-
-> Jika hosting menghapus filesystem setiap redeploy dan tidak menggunakan persistent volume, session juga akan hilang dan QR perlu dipindai lagi.
-
-## 📲 Menghubungkan WhatsApp
-
-Setelah deploy buka:
-
-```text
-https://DOMAIN-KAMU/wa
-```
-
-1. Tunggu QR muncul.
-2. Buka WhatsApp di HP.
-3. Masuk ke **Perangkat tertaut / Linked devices**.
-4. Scan QR dari halaman Nextura.
-5. Setelah berhasil, status berubah menjadi `connected`.
-
-Gunakan tombol **Logout sesi** hanya jika memang ingin melepas akun. Logout akan menghapus session sehingga QR baru diperlukan.
-
-## 🧩 Plugin Manager
-
-Buka:
-
-```text
-https://DOMAIN-KAMU/plugins
-```
-
-Masukkan nilai `WA_ADMIN_KEY`. Dari halaman tersebut kamu bisa:
-
-- upload plugin baru;
-- membuat plugin baru;
-- membuka source plugin;
-- mengedit source;
-- menyimpan perubahan;
-- menghapus plugin.
-
-Plugin disimpan di folder `wa-plugins/` dan loader akan memeriksa perubahan secara otomatis.
-
-### Struktur plugin sederhana
-
-```js
-export default async function plugin({ sock, message }) {
-  const jid = message?.key?.remoteJid;
-  if (!jid || message?.key?.fromMe) return;
-
-  // logic plugin di sini
-}
 ```
 
 ## 🤖 AI Chat Nextura
 
-Plugin `wa-plugins/ai-chat.js` menggunakan endpoint:
+Plugin `wa-plugins/ai-chat.js` memakai:
 
 ```text
-https://nextura.my.id/v1/chat/completions
+POST https://api.nextura.my.id/v1/chat/completions
 ```
 
-API key diambil dari:
+Jika `NEXTURA_AI_MODEL` kosong, plugin terlebih dahulu membaca:
 
-```env
-NEXTURA_AI_API_KEY=...
+```text
+GET https://api.nextura.my.id/v1/models
 ```
 
-Contoh penggunaan dari WhatsApp:
+lalu memilih model yang tersedia. Ini menghindari hardcode model yang bisa berubah.
+
+Contoh penggunaan WhatsApp:
 
 ```text
 .ai Halo, siapa kamu?
@@ -169,89 +115,133 @@ atau:
 ai Jelaskan Cloudflare Workers
 ```
 
-Model dapat diganti tanpa mengubah source:
+## 👁️ Auto-read
+
+Default:
 
 ```env
-NEXTURA_AI_MODEL=Nextura/cortexa-nexus2.7
+WA_AUTO_READ=true
 ```
 
-## 🟢 Plugin Ping
+Setiap pesan masuk akan ditandai sudah dibaca sebelum plugin memprosesnya. Untuk mematikan:
 
-Plugin bawaan `wa-plugins/ping.js` digunakan untuk mengetes apakah bot menerima pesan.
+```env
+WA_AUTO_READ=false
+```
 
-Kirim:
+## 🖥️ Live Console
+
+Buka:
 
 ```text
-ping
+https://DOMAIN-KAMU/console
 ```
 
-Bot akan memberikan balasan bahwa Nextura WA aktif.
+Masukkan `WA_ADMIN_KEY`. Console refresh otomatis setiap sekitar 1 detik dan menampilkan:
+
+- pesan WhatsApp masuk;
+- pesan keluar dari bot;
+- prompt yang dikirim ke Nextura AI;
+- model AI yang dipakai;
+- jawaban AI;
+- status koneksi;
+- plugin error / API error.
+
+Log console disimpan sementara di memory dan dibatasi oleh `WA_CONSOLE_MAX_LOGS`.
+
+## 🧩 Plugin Manager
+
+Buka:
+
+```text
+https://DOMAIN-KAMU/plugins
+```
+
+Masukkan `WA_ADMIN_KEY`. Kamu bisa upload, buat, edit, simpan, dan hapus plugin langsung dari browser.
+
+Contoh plugin:
+
+```js
+export default async function plugin({ sock, message, log }) {
+  const jid = message?.key?.remoteJid;
+  if (!jid || message?.key?.fromMe) return;
+
+  log?.("plugin_info", { jid, text: "Plugin jalan" });
+}
+```
+
+## 💾 Session WhatsApp Persistent
+
+Gunakan persistent volume yang di-mount ke `/data`, lalu:
+
+```env
+WA_SESSION_DIR=/data/nextura-wa-session
+```
+
+Selama folder tersebut tidak hilang, bot dapat memakai session lama setelah restart/redeploy tanpa scan QR lagi.
 
 ## ❤️ Health & Uptime
 
-Route monitoring lama tetap dipertahankan agar monitor yang sudah ada tidak perlu diubah:
+Route monitoring lama tetap ada:
 
 ```text
 /health-1
 /health-2
 /health-3
-
 /uptime-1
 /uptime-2
 /uptime-3
 ```
 
-Selain itu tersedia `/health`, `/uptime`, `/ping`, serta alias `/health/1` sampai `/health/3` dan `/uptime/1` sampai `/uptime/3`.
+Selain itu ada `/health`, `/uptime`, `/ping`, serta alias `/health/1..3` dan `/uptime/1..3`.
 
-Response health juga menampilkan status WhatsApp dan jumlah plugin aktif.
+## 🚀 Menjalankan
 
-## 🚀 Menjalankan Lokal
-
-Node.js minimum: **22**.
+Node.js minimum **22**.
 
 ```bash
 npm install
 npm start
 ```
 
-Untuk development:
+Untuk cek syntax:
 
 ```bash
-npm run dev
+npm run check
 ```
 
-## ☁️ Deploy
+## ☁️ Docker / Deploy
 
-Project dapat dijalankan pada hosting Node.js yang mendukung Node 22+.
-
-Konfigurasi dasar:
+Dockerfile sekarang dibuat ringan dan tidak lagi meng-install Chromium/Puppeteer/font stack lama.
 
 ```text
 Start command : npm start
-Port          : 8000 / PORT dari hosting
 Health check  : /health
+Port          : PORT dari hosting, default 8000
 ```
 
-Untuk session WhatsApp yang tahan restart/redeploy, gunakan hosting dengan persistent storage/volume dan arahkan `WA_SESSION_DIR` ke volume tersebut.
+`WORKDIR /app` pada Docker adalah normal. Jika log npm menulis `npm error path /app`, baris itu hanya menunjukkan direktori kerja; lihat baris error tepat di atas/bawahnya untuk penyebab spesifik. Dockerfile saat ini sudah disederhanakan agar instalasi dependency lebih ringan.
 
-## 📁 Struktur Utama
+## 📁 Struktur
 
 ```text
-sdk-compat.js          Web server + halaman WA + Plugin Manager + health/uptime
-whatsapp-bot.js        Koneksi Baileys, QR, session, reconnect, plugin loader
+start.js               bootstrap session path
+sdk-compat.js          web server, QR, Plugin Manager, Live Console, health/uptime
+whatsapp-bot.js        Baileys, auto-read, session, reconnect, plugin loader
+live-console.js        ring buffer log Live Console
 wa-plugins/
-├── ping.js            Tes bot
-└── ai-chat.js         Chat AI melalui nextura.my.id
+├── ping.js
+└── ai-chat.js
 ```
 
 ## 🔒 Keamanan
 
-- Jangan commit API key ke repository.
-- Gunakan `WA_ADMIN_KEY` yang panjang dan acak.
-- Jangan membagikan halaman Plugin Manager beserta admin key kepada orang lain.
+- Jangan commit API key.
+- Gunakan `WA_ADMIN_KEY` panjang dan acak.
+- Jangan bagikan akses `/plugins` atau `/console` beserta admin key.
+- Isi Live Console dapat memuat percakapan WhatsApp, jadi perlakukan sebagai data privat.
 - Jangan upload plugin yang tidak dipercaya karena plugin berjalan di proses Node.js bot.
-- Simpan secret melalui dashboard environment hosting.
 
 ---
 
-**Nextura WhatsApp Bot** — ringan, modular, dan plugin dapat dikelola langsung dari browser. 🚀
+**Nextura WhatsApp Bot** — ringan, modular, dan bisa dikelola dari browser. 🚀
