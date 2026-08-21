@@ -6,89 +6,174 @@ function getText(message) {
     || "";
 }
 
-let cachedModel = "";
-let cachedAt = 0;
+const chatModes = new Map();
+const VALID_MODES = new Set(["cepat", "pintar"]);
+const DEFAULT_MODE = String(process.env.NERA_AI_DEFAULT_MODE || "cepat").toLowerCase() === "pintar"
+  ? "pintar"
+  : "cepat";
 
-async function resolveModel(baseUrl, apiKey, log) {
-  const configured = String(process.env.NEXTURA_AI_MODEL || "").trim();
-  if (configured) return configured;
-  if (cachedModel && Date.now() - cachedAt < 10 * 60 * 1000) return cachedModel;
-
-  const response = await fetch(`${baseUrl}/v1/models`, {
-    headers: { authorization: `Bearer ${apiKey}` },
-    signal: AbortSignal.timeout(Number(process.env.NEXTURA_AI_TIMEOUT_MS || 120000))
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.error?.message || data?.message || `Gagal membaca model: HTTP ${response.status}`);
-
-  const models = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
-  const preferred = models.find((item) => item?.id && item?.object === "model") || models[0];
-  const model = String(preferred?.id || preferred?.name || "").trim();
-  if (!model) throw new Error("API Nextura tidak mengembalikan model. Isi NEXTURA_AI_MODEL di environment jika endpoint /v1/models tidak tersedia.");
-
-  cachedModel = model;
-  cachedAt = Date.now();
-  log?.("ai_model", { model, text: `Model otomatis: ${model}` });
-  return model;
+function getChatMode(jid) {
+  return chatModes.get(jid) || DEFAULT_MODE;
 }
 
-export default async function nexturaAiPlugin({ sock, message, log }) {
+function setChatMode(jid, mode) {
+  if (!VALID_MODES.has(mode)) return false;
+  chatModes.set(jid, mode);
+  return true;
+}
+
+async function askNera(text, mode, log, jid) {
+  const baseUrl = String(
+    process.env.NERA_AI_BASE_URL || "https://api.axynera.my.id"
+  ).replace(/\/+$/, "");
+
+  const model = String(process.env.NERA_AI_MODEL || "Nera-Plus.5").trim() || "Nera-Plus.5";
+  const apiKey = String(process.env.NERA_AI_API_KEY || "").trim();
+  const timeoutMs = Number(process.env.NERA_AI_TIMEOUT_MS || 120000);
+
+  const headers = {
+    "Content-Type": "application/json"
+  };
+
+  // Opsional: endpoint Axynera saat ini bisa dipakai tanpa key.
+  // Kalau nanti API key diaktifkan, cukup isi NERA_AI_API_KEY di environment.
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+
+  log?.("ai_request", {
+    jid,
+    model,
+    mode,
+    text
+  });
+
+  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model,
+      mode,
+      stream: false,
+      messages: [
+        {
+          role: "user",
+          content: text
+        }
+      ]
+    }),
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const detail = data?.error?.message || data?.message || `Nera API ${response.status}`;
+    throw new Error(detail);
+  }
+
+  const answer = String(
+    data?.choices?.[0]?.message?.content ||
+    data?.message ||
+    ""
+  ).trim();
+
+  if (!answer) {
+    throw new Error("Nera tidak mengirim balasan.");
+  }
+
+  log?.("ai_response", {
+    jid,
+    model: data?.model || model,
+    mode,
+    text: answer
+  });
+
+  return answer;
+}
+
+export default async function neraAiPlugin({ sock, message, log }) {
   const jid = message?.key?.remoteJid;
   if (!jid || message?.key?.fromMe || jid === "status@broadcast") return;
 
   const raw = String(getText(message)).trim();
   if (!raw) return;
 
+  const lower = raw.toLowerCase();
+
+  // Pilih mode AI per chat.
+  // Contoh: .mode cepat | .mode pintar | .mode
+  const modeMatch = raw.match(/^\.?(?:mode|nera\s+mode)(?:\s+(cepat|pintar))?\s*$/i);
+  if (modeMatch) {
+    const requestedMode = String(modeMatch[1] || "").toLowerCase();
+
+    if (!requestedMode) {
+      const currentMode = getChatMode(jid);
+      await sock.sendMessage(
+        jid,
+        {
+          text:
+            `⚙️ *Mode Nera saat ini: ${currentMode}*\n\n` +
+            `Gunakan:\n` +
+            `• *.mode cepat* — respons lebih cepat\n` +
+            `• *.mode pintar* — penalaran lebih dalam`
+        },
+        { quoted: message }
+      );
+      return;
+    }
+
+    setChatMode(jid, requestedMode);
+    log?.("ai_mode", { jid, mode: requestedMode });
+
+    await sock.sendMessage(
+      jid,
+      {
+        text:
+          requestedMode === "pintar"
+            ? "🧠 Mode Nera diubah ke *pintar*."
+            : "⚡ Mode Nera diubah ke *cepat*."
+      },
+      { quoted: message }
+    );
+    return;
+  }
+
   const commandMatch = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
   const autoReply = String(process.env.WA_AI_AUTO_REPLY || "true").toLowerCase() !== "false";
 
   // Jangan berebut dengan plugin command lain.
-  if (!commandMatch && (!autoReply || raw.toLowerCase() === "ping" || raw.startsWith("."))) return;
+  if (!commandMatch && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
 
   const prompt = commandMatch ? commandMatch[1].trim() : raw;
   if (!prompt) return;
 
-  const apiKey = String(process.env.NEXTURA_AI_API_KEY || process.env.NEXTURA_API_KEY || "").trim();
-  const baseUrl = String(process.env.NEXTURA_AI_BASE_URL || "https://api.nextura.my.id").replace(/\/+$/, "");
-
-  if (!apiKey) {
-    const text = "NEXTURA_AI_API_KEY belum disetel di environment.";
-    log?.("ai_error", { jid, error: text });
-    await sock.sendMessage(jid, { text }, { quoted: message });
-    return;
-  }
+  const mode = getChatMode(jid);
 
   try {
     await sock.sendPresenceUpdate("composing", jid).catch(() => {});
-    const model = await resolveModel(baseUrl, apiKey, log);
-    log?.("ai_request", { jid, model, text: prompt });
 
-    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "user", content: prompt }],
-        stream: false
-      }),
-      signal: AbortSignal.timeout(Number(process.env.NEXTURA_AI_TIMEOUT_MS || 120000))
+    const answer = await askNera(prompt, mode, log, jid);
+
+    await sock.sendMessage(
+      jid,
+      { text: answer },
+      { quoted: message }
+    );
+  } catch (error) {
+    const errorText = error?.message || String(error);
+    log?.("ai_error", {
+      jid,
+      mode,
+      error: errorText,
+      text: prompt
     });
 
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data?.error?.message || data?.message || `HTTP ${response.status}`);
+    console.error("[nera-ai]", errorText);
 
-    const answer = String(data?.choices?.[0]?.message?.content || data?.message || "").trim();
-    if (!answer) throw new Error("AI tidak mengembalikan isi jawaban.");
-
-    log?.("ai_response", { jid, model: data?.model || model, text: answer });
-    await sock.sendMessage(jid, { text: answer }, { quoted: message });
-  } catch (error) {
-    const errorText = error.message || String(error);
-    log?.("ai_error", { jid, error: errorText, text: prompt });
-    await sock.sendMessage(jid, { text: `AI error: ${errorText}` }, { quoted: message }).catch(() => {});
+    await sock.sendMessage(
+      jid,
+      { text: "Nera sedang bermasalah, coba lagi sebentar." },
+      { quoted: message }
+    ).catch(() => {});
   } finally {
     await sock.sendPresenceUpdate("paused", jid).catch(() => {});
   }
