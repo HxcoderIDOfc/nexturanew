@@ -3,6 +3,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import makeWASocket, {
   DisconnectReason,
+  downloadMediaMessage,
   fetchLatestBaileysVersion,
   useMultiFileAuthState
 } from "@whiskeysockets/baileys";
@@ -11,8 +12,14 @@ import { pushConsoleLog } from "./live-console.js";
 
 const SESSION_DIR = path.resolve(process.env.WA_SESSION_DIR || "/tmp/nextura-wa-session");
 const PLUGIN_DIR = path.resolve(process.env.WA_PLUGIN_DIR || "./wa-plugins");
+const MEDIA_DIR = path.resolve(process.env.WA_MEDIA_DIR || path.join(SESSION_DIR, "media"));
 const PLUGIN_RELOAD_MS = Number(process.env.WA_PLUGIN_RELOAD_MS || 5000);
 const AUTO_READ = String(process.env.WA_AUTO_READ || "true").toLowerCase() !== "false";
+const AUTO_DOWNLOAD_IMAGES = String(process.env.WA_AUTO_DOWNLOAD_IMAGES || "true").toLowerCase() !== "false";
+const AUTO_ONLINE = String(process.env.WA_AUTO_ONLINE || "true").toLowerCase() !== "false";
+const PRESENCE_INTERVAL_MS = Math.max(30000, Number(process.env.WA_PRESENCE_INTERVAL_MS || 60000));
+const ABOUT_UPDATE_MS = Math.max(60000, Number(process.env.WA_ABOUT_UPDATE_MS || 60000));
+const ABOUT_PREFIX = String(process.env.WA_ABOUT_PREFIX || "🤖 Axynera Ai⌚ Aktif").trim();
 
 const state = {
   status: "starting",
@@ -23,6 +30,9 @@ const state = {
   pluginCount: 0,
   lastError: null,
   autoRead: AUTO_READ,
+  autoDownloadImages: AUTO_DOWNLOAD_IMAGES,
+  autoOnline: AUTO_ONLINE,
+  about: null,
   updatedAt: Date.now()
 };
 
@@ -30,6 +40,8 @@ let sock = null;
 let pluginTimer = null;
 let plugins = [];
 let reconnectTimer = null;
+let presenceTimer = null;
+let aboutTimer = null;
 
 function setState(patch = {}) {
   Object.assign(state, patch, { updatedAt: Date.now() });
@@ -46,6 +58,96 @@ function getText(message) {
 
 function jidLabel(jid = "") {
   return String(jid).replace(/@s\.whatsapp\.net$/i, "").replace(/@g\.us$/i, " [group]");
+}
+
+function safeName(value = "") {
+  return String(value || "unknown").replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 80);
+}
+
+function imageExtension(message) {
+  const mime = String(message?.message?.imageMessage?.mimetype || "image/jpeg").toLowerCase();
+  if (mime.includes("png")) return ".png";
+  if (mime.includes("webp")) return ".webp";
+  if (mime.includes("gif")) return ".gif";
+  return ".jpg";
+}
+
+function formatUptime(from = Date.now()) {
+  const totalMinutes = Math.max(0, Math.floor((Date.now() - from) / 60000));
+  if (totalMinutes < 1) return "0 Menit";
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (!hours) return `${minutes} Menit`;
+  if (!minutes) return `${hours} Jam`;
+  return `${hours} Jam ${minutes} Menit`;
+}
+
+function stopLiveProfileTimers() {
+  if (presenceTimer) clearInterval(presenceTimer);
+  if (aboutTimer) clearInterval(aboutTimer);
+  presenceTimer = null;
+  aboutTimer = null;
+}
+
+async function updateOnlinePresence() {
+  if (!sock || state.status !== "connected" || !AUTO_ONLINE) return;
+  try {
+    await sock.sendPresenceUpdate("available");
+  } catch (error) {
+    pushConsoleLog("presence_error", { error: error.message });
+  }
+}
+
+async function updateDynamicAbout() {
+  if (!sock || state.status !== "connected" || !state.connectedAt) return;
+  const about = `${ABOUT_PREFIX} ${formatUptime(state.connectedAt)}`;
+  if (about === state.about) return;
+  try {
+    await sock.updateProfileStatus(about);
+    setState({ about });
+    pushConsoleLog("about_update", { text: about });
+  } catch (error) {
+    pushConsoleLog("about_error", { error: error.message, text: about });
+  }
+}
+
+function startLiveProfileTimers() {
+  stopLiveProfileTimers();
+  void updateOnlinePresence();
+  void updateDynamicAbout();
+  if (AUTO_ONLINE) {
+    presenceTimer = setInterval(() => void updateOnlinePresence(), PRESENCE_INTERVAL_MS);
+    presenceTimer.unref?.();
+  }
+  aboutTimer = setInterval(() => void updateDynamicAbout(), ABOUT_UPDATE_MS);
+  aboutTimer.unref?.();
+}
+
+async function downloadIncomingImage(message) {
+  if (!AUTO_DOWNLOAD_IMAGES || message?.key?.fromMe || !message?.message?.imageMessage) return null;
+  try {
+    fs.mkdirSync(MEDIA_DIR, { recursive: true });
+    const buffer = await downloadMediaMessage(message, "buffer", {});
+    if (!Buffer.isBuffer(buffer) || !buffer.length) throw new Error("buffer gambar kosong");
+    const jid = safeName(message?.key?.remoteJid || "unknown");
+    const id = safeName(message?.key?.id || Date.now());
+    const filename = `${Date.now()}-${jid}-${id}${imageExtension(message)}`;
+    const filePath = path.join(MEDIA_DIR, filename);
+    fs.writeFileSync(filePath, buffer);
+    const media = {
+      type: "image",
+      path: filePath,
+      filename,
+      mimetype: message.message.imageMessage.mimetype || "image/jpeg",
+      size: buffer.length,
+      caption: message.message.imageMessage.caption || ""
+    };
+    pushConsoleLog("media_download", { jid: message?.key?.remoteJid || "", ...media });
+    return media;
+  } catch (error) {
+    pushConsoleLog("media_download_error", { jid: message?.key?.remoteJid || "", error: error.message });
+    return null;
+  }
 }
 
 async function loadPlugins() {
@@ -81,13 +183,14 @@ async function loadPlugins() {
   }
 }
 
-async function dispatchPlugins(message) {
+async function dispatchPlugins(message, media = null) {
   if (!sock || !message?.message) return;
   for (const plugin of plugins) {
     try {
       await plugin.handler({
         sock,
         message,
+        media,
         state: getWhatsAppState,
         log: (type, payload = {}) => pushConsoleLog(type, { plugin: plugin.name, ...payload })
       });
@@ -123,7 +226,9 @@ function scheduleReconnect() {
 
 async function connectWhatsApp() {
   try {
+    stopLiveProfileTimers();
     fs.mkdirSync(SESSION_DIR, { recursive: true });
+    fs.mkdirSync(MEDIA_DIR, { recursive: true });
     await loadPlugins();
     if (!pluginTimer) pluginTimer = setInterval(() => void loadPlugins(), PLUGIN_RELOAD_MS).unref();
 
@@ -135,8 +240,8 @@ async function connectWhatsApp() {
       auth: authState,
       printQRInTerminal: false,
       syncFullHistory: false,
-      markOnlineOnConnect: false,
-      browser: ["Nextura WA", "Chrome", "1.0.0"]
+      markOnlineOnConnect: AUTO_ONLINE,
+      browser: ["Axynera AI", "Chrome", "1.0.0"]
     });
 
     sock.ev.on("creds.update", saveCreds);
@@ -154,8 +259,6 @@ async function connectWhatsApp() {
           text: text || `[${Object.keys(message.message || {})[0] || "message"}]`
         });
 
-        // Hanya pesan live yang boleh memicu command/AI.
-        // History sync/append tidak dibalas ulang.
         if (type !== "notify") continue;
 
         if (AUTO_READ && !fromMe && message?.key) {
@@ -164,7 +267,8 @@ async function connectWhatsApp() {
           });
         }
 
-        await dispatchPlugins(message);
+        const media = await downloadIncomingImage(message);
+        await dispatchPlugins(message, media);
       }
     });
 
@@ -206,11 +310,14 @@ async function connectWhatsApp() {
           qrDataUrl: null,
           connectedAt: Date.now(),
           phone: id.split(":")[0] || null,
-          lastError: null
+          lastError: null,
+          about: null
         });
+        startLiveProfileTimers();
         pushConsoleLog("connection", { status: "connected", text: "WhatsApp terhubung" });
       }
       if (connection === "close") {
+        stopLiveProfileTimers();
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const loggedOut = statusCode === DisconnectReason.loggedOut;
         setState({
@@ -227,6 +334,7 @@ async function connectWhatsApp() {
       }
     });
   } catch (error) {
+    stopLiveProfileTimers();
     setState({ status: "error", lastError: error.message || String(error) });
     pushConsoleLog("connection_error", { error: error.message || String(error) });
     scheduleReconnect();
@@ -234,10 +342,11 @@ async function connectWhatsApp() {
 }
 
 export function getWhatsAppState() {
-  return { ...state, pluginDir: PLUGIN_DIR, sessionDir: SESSION_DIR };
+  return { ...state, pluginDir: PLUGIN_DIR, sessionDir: SESSION_DIR, mediaDir: MEDIA_DIR };
 }
 
 export async function restartWhatsApp() {
+  stopLiveProfileTimers();
   try { sock?.end?.(new Error("manual restart")); } catch {}
   sock = null;
   setState({ status: "restarting", qr: null, qrDataUrl: null });
@@ -247,10 +356,11 @@ export async function restartWhatsApp() {
 }
 
 export async function logoutWhatsApp() {
+  stopLiveProfileTimers();
   try { await sock?.logout?.(); } catch {}
   try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch {}
   sock = null;
-  setState({ status: "logged_out", qr: null, qrDataUrl: null, phone: null, connectedAt: null });
+  setState({ status: "logged_out", qr: null, qrDataUrl: null, phone: null, connectedAt: null, about: null });
   pushConsoleLog("connection", { status: "logged_out", text: "Session WhatsApp dihapus" });
   scheduleReconnect();
   return getWhatsAppState();
