@@ -2,12 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-function getText(message) {
-  return message?.message?.conversation
-    || message?.message?.extendedTextMessage?.text
-    || message?.message?.imageMessage?.caption
-    || message?.message?.videoMessage?.caption
-    || "";
+function getText(m) {
+  return m?.message?.conversation || m?.message?.extendedTextMessage?.text || m?.message?.imageMessage?.caption || m?.message?.videoMessage?.caption || "";
 }
 
 const VALID_MODES = new Set(["cepat", "pintar"]);
@@ -24,10 +20,10 @@ function loadStore() {
   try {
     fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
     if (!fs.existsSync(MEMORY_FILE)) return emptyStore();
-    const parsed = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8"));
-    return { version: 1, aliases: parsed?.aliases || {}, sessions: parsed?.sessions || {} };
-  } catch (error) {
-    console.error("[nera-memory] gagal membaca memory:", error.message);
+    const x = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8"));
+    return { version: 1, aliases: x?.aliases || {}, sessions: x?.sessions || {} };
+  } catch (e) {
+    console.error("[nera-memory] gagal membaca:", e.message);
     return emptyStore();
   }
 }
@@ -35,159 +31,129 @@ const store = loadStore();
 function saveStore() {
   try {
     fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
-    const temp = `${MEMORY_FILE}.tmp`;
-    fs.writeFileSync(temp, JSON.stringify(store, null, 2), "utf8");
-    fs.renameSync(temp, MEMORY_FILE);
-  } catch (error) {
-    console.error("[nera-memory] gagal menyimpan memory:", error.message);
-  }
+    const tmp = `${MEMORY_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(store, null, 2), "utf8");
+    fs.renameSync(tmp, MEMORY_FILE);
+  } catch (e) { console.error("[nera-memory] gagal menyimpan:", e.message); }
 }
-function normalizeJid(v = "") { return String(v || "").trim().toLowerCase(); }
-function isLid(jid = "") { return normalizeJid(jid).endsWith("@lid"); }
-function canonicalJid(jid = "") { const c = normalizeJid(jid); return normalizeJid(store.aliases[c] || c); }
-function firstLid(values = []) { return values.map(normalizeJid).find(isLid) || ""; }
-function firstJid(values = []) { return values.map(normalizeJid).find(Boolean) || ""; }
+
+const norm = (v = "") => String(v || "").trim().toLowerCase();
+const isLid = (v = "") => norm(v).endsWith("@lid");
+const canonical = (v = "") => norm(store.aliases[norm(v)] || norm(v));
+const firstLid = (arr = []) => arr.map(norm).find(isLid) || "";
+const firstJid = (arr = []) => arr.map(norm).find(Boolean) || "";
 
 function getIdentity(message) {
-  const key = message?.key || {};
-  const remote = normalizeJid(key.remoteJid);
+  const k = message?.key || {};
+  const remote = norm(k.remoteJid);
   if (remote.endsWith("@g.us")) {
-    const candidates = [key.participant, key.participantAlt, key.senderLid, key.senderPn, key.participantPn];
-    const participant = canonicalJid(firstLid(candidates) || firstJid(candidates) || "unknown");
-    return { key: `group:${remote}|user:${participant}`, identity: participant, chatJid: remote, groupJid: remote };
+    const p = canonical(firstLid([k.participant, k.participantAlt, k.senderLid, k.senderPn, k.participantPn]) || firstJid([k.participant, k.participantAlt, k.senderLid, k.senderPn, k.participantPn]) || "unknown");
+    return { key: `group:${remote}|user:${p}`, identity: p, chatJid: remote, groupJid: remote };
   }
-  const candidates = [key.remoteJid, key.remoteJidAlt, key.senderLid, key.senderPn, key.participant, key.participantAlt];
-  const identity = canonicalJid(firstLid(candidates) || firstJid(candidates) || remote);
-  return { key: `dm:${identity}`, identity, chatJid: remote || identity, groupJid: null };
+  const id = canonical(firstLid([k.remoteJid, k.remoteJidAlt, k.senderLid, k.senderPn, k.participant, k.participantAlt]) || firstJid([k.remoteJid, k.remoteJidAlt, k.senderLid, k.senderPn, k.participant, k.participantAlt]) || remote);
+  return { key: `dm:${id}`, identity: id, chatJid: remote || id, groupJid: null };
 }
 
 function newSession(info, mode = DEFAULT_MODE) {
   const now = Date.now();
-  return {
-    id: randomUUID(), identity: info.identity,
-    chatJids: [...new Set([info.chatJid, info.identity].filter(Boolean))],
-    groupJid: info.groupJid, mode, messages: [], createdAt: now, updatedAt: now
-  };
+  return { id: randomUUID(), identity: info.identity, chatJids: [...new Set([info.chatJid, info.identity].filter(Boolean))], groupJid: info.groupJid, mode, messages: [], createdAt: now, updatedAt: now };
 }
 function getSession(info) {
-  let session = store.sessions[info.key];
-  if (!session) {
-    session = newSession(info);
-    store.sessions[info.key] = session;
-    saveStore();
-  }
-  return session;
+  if (!store.sessions[info.key]) { store.sessions[info.key] = newSession(info); saveStore(); }
+  return store.sessions[info.key];
 }
-function trimMessages(messages = []) { return messages.slice(-(MAX_TURNS * 2)); }
+const trimMessages = (m = []) => m.slice(-(MAX_TURNS * 2));
 function setChatMode(info, mode) {
   if (!VALID_MODES.has(mode)) return false;
-  const session = getSession(info);
-  session.mode = mode;
-  session.updatedAt = Date.now();
-  saveStore();
-  return true;
+  const s = getSession(info); s.mode = mode; s.updatedAt = Date.now(); saveStore(); return true;
 }
-
 function migrateAlias(pn, lid, log) {
-  const cleanPn = normalizeJid(pn), cleanLid = normalizeJid(lid);
-  if (!cleanPn || !cleanLid || !isLid(cleanLid)) return;
-  store.aliases[cleanPn] = cleanLid;
-  store.aliases[cleanLid] = cleanLid;
-  const oldKey = `dm:${cleanPn}`, newKey = `dm:${cleanLid}`;
+  const a = norm(pn), b = norm(lid); if (!a || !b || !isLid(b)) return;
+  store.aliases[a] = b; store.aliases[b] = b;
+  const oldKey = `dm:${a}`, newKey = `dm:${b}`;
   if (store.sessions[oldKey]) {
     if (!store.sessions[newKey]) store.sessions[newKey] = store.sessions[oldKey];
     else store.sessions[newKey].messages = trimMessages([...(store.sessions[oldKey].messages || []), ...(store.sessions[newKey].messages || [])]);
-    store.sessions[newKey].identity = cleanLid;
-    delete store.sessions[oldKey];
+    store.sessions[newKey].identity = b; delete store.sessions[oldKey];
   }
-  for (const [key, session] of Object.entries(store.sessions)) {
-    if (!key.includes(`|user:${cleanPn}`)) continue;
-    const migrated = key.replace(`|user:${cleanPn}`, `|user:${cleanLid}`);
-    if (!store.sessions[migrated]) { session.identity = cleanLid; store.sessions[migrated] = session; }
-    delete store.sessions[key];
+  for (const [k, s] of Object.entries(store.sessions)) {
+    if (!k.includes(`|user:${a}`)) continue;
+    const nk = k.replace(`|user:${a}`, `|user:${b}`);
+    if (!store.sessions[nk]) { s.identity = b; store.sessions[nk] = s; }
+    delete store.sessions[k];
   }
-  saveStore();
-  log?.("ai_lid_mapping", { pn: cleanPn, lid: cleanLid });
+  saveStore(); log?.("ai_lid_mapping", { pn: a, lid: b });
 }
-
 function resetSessionsForChat(jid, log) {
-  const clean = normalizeJid(jid), canonical = canonicalJid(clean);
-  let removed = 0;
-  for (const [key, session] of Object.entries(store.sessions)) {
-    const chats = (session.chatJids || []).map(normalizeJid);
-    if (key === `dm:${clean}` || key === `dm:${canonical}` || session.groupJid === clean || chats.includes(clean) || chats.includes(canonical)) {
-      delete store.sessions[key]; removed++;
-    }
+  const a = norm(jid), b = canonical(a); let removed = 0;
+  for (const [k, s] of Object.entries(store.sessions)) {
+    const chats = (s.chatJids || []).map(norm);
+    if (k === `dm:${a}` || k === `dm:${b}` || s.groupJid === a || chats.includes(a) || chats.includes(b)) { delete store.sessions[k]; removed++; }
   }
-  if (removed) saveStore();
-  log?.("ai_memory_reset", { jid: clean, removed, reason: "chat_deleted" });
+  if (removed) saveStore(); log?.("ai_memory_reset", { jid: a, removed, reason: "chat_deleted" });
 }
 
 function parseSseBlock(block) {
-  let event = "message";
-  const dataLines = [];
+  let event = "message"; const data = [];
   for (const line of block.split(/\r?\n/)) {
     if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+    else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
   }
-  return { event, data: dataLines.join("\n") };
+  return { event, data: data.join("\n") };
 }
-
 function extractSseText(payload) {
   if (!payload || payload === "[DONE]") return { type: "none", text: "" };
   try {
-    const data = JSON.parse(payload);
-    const delta = data?.choices?.[0]?.delta?.content ?? data?.delta ?? data?.content?.delta;
+    const d = JSON.parse(payload);
+    const delta = d?.choices?.[0]?.delta?.content ?? d?.delta ?? d?.content?.delta;
     if (delta != null) return { type: "delta", text: String(delta) };
-    const full = data?.choices?.[0]?.message?.content ?? data?.message?.content;
+    const full = d?.choices?.[0]?.message?.content ?? d?.message?.content;
     if (full != null) return { type: "full", text: String(full) };
-    if (typeof data?.text === "string") return { type: "delta", text: data.text };
-    if (typeof data?.content === "string") return { type: "delta", text: data.content };
+    if (typeof d?.text === "string") return { type: "delta", text: d.text };
+    if (typeof d?.content === "string") return { type: "delta", text: d.content };
   } catch {}
   return { type: "none", text: "" };
 }
-
-function stripHiddenReasoning(value = "") {
-  let text = String(value || "");
-  text = text.replace(/<think\b[^>]*>[\s\S]*?<\/think\s*>/gi, "");
-  text = text.replace(/<reasoning\b[^>]*>[\s\S]*?<\/reasoning\s*>/gi, "");
-  text = text.replace(/<analysis\b[^>]*>[\s\S]*?<\/analysis\s*>/gi, "");
-  text = text.replace(/<think\b[^>]*>[\s\S]*$/gi, "");
-  text = text.replace(/<reasoning\b[^>]*>[\s\S]*$/gi, "");
-  text = text.replace(/<analysis\b[^>]*>[\s\S]*$/gi, "");
-  text = text.replace(/<\/?(?:think|reasoning|analysis)\b[^>]*>/gi, "");
-  return text.trim();
+function stripHiddenReasoning(v = "") {
+  let t = String(v || "");
+  t = t.replace(/<(think|reasoning|analysis)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "");
+  t = t.replace(/<(think|reasoning|analysis)\b[^>]*>[\s\S]*$/gi, "");
+  t = t.replace(/<\/?(?:think|reasoning|analysis)\b[^>]*>/gi, "");
+  return t.trim();
 }
-
 function buildUserContent(prompt, media) {
   const text = String(prompt || "").trim() || (media?.type === "image" ? "Jelaskan gambar ini." : "Halo");
   if (!media || media.type !== "image" || !media.path || !fs.existsSync(media.path)) return text;
   const stat = fs.statSync(media.path);
   if (stat.size > MAX_IMAGE_BYTES) throw new Error(`Gambar terlalu besar (${Math.ceil(stat.size / 1024 / 1024)} MB). Maksimal ${Math.floor(MAX_IMAGE_BYTES / 1024 / 1024)} MB.`);
-  const base64 = fs.readFileSync(media.path).toString("base64");
-  const mime = media.mimetype || "image/jpeg";
-  return [
-    { type: "text", text },
-    { type: "image_url", image_url: { url: `data:${mime};base64,${base64}` } }
-  ];
+  const b64 = fs.readFileSync(media.path).toString("base64");
+  return [{ type: "text", text }, { type: "image_url", image_url: { url: `data:${media.mimetype || "image/jpeg"};base64,${b64}` } }];
 }
 
 function neraHeaders(apiKey) {
-  const headers = {
-    "Content-Type": "application/json",
-    Accept: "text/event-stream",
-    "User-Agent": "Axynera-WhatsApp-Bot/1.0"
-  };
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-  return headers;
+  const h = { "Content-Type": "application/json", Accept: "text/event-stream", "User-Agent": "Axynera-WhatsApp-Bot/1.0" };
+  if (apiKey) h.Authorization = `Bearer ${apiKey}`;
+  return h;
 }
-
+function isHtml(body = "", contentType = "") {
+  const s = String(body || "").trim().toLowerCase();
+  return String(contentType || "").toLowerCase().includes("text/html") || s.startsWith("<!doctype html") || s.startsWith("<html") || s.includes("<title>cloudflare");
+}
+function safeHttpError(status, body, contentType) {
+  if (isHtml(body, contentType)) {
+    const e = new Error(`Nera gateway sedang bermasalah (HTTP ${status}).`);
+    e.code = "NERA_GATEWAY_HTML"; e.status = status; return e;
+  }
+  try {
+    const d = JSON.parse(body || "{}");
+    const msg = d?.error?.message || d?.message;
+    if (msg) { const e = new Error(String(msg)); e.status = status; return e; }
+  } catch {}
+  const e = new Error(`Nera API HTTP ${status}.`); e.status = status; return e;
+}
 async function doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, includeModel = true }) {
-  const payload = { mode, stream: true, messages };
-  if (includeModel && model) payload.model = model;
-  return fetch(`${baseUrl}/v1/chat/completions`, {
-    method: "POST", headers: neraHeaders(apiKey), body: JSON.stringify(payload), signal: AbortSignal.timeout(timeoutMs)
-  });
+  const payload = { mode, stream: true, messages }; if (includeModel && model) payload.model = model;
+  return fetch(`${baseUrl}/v1/chat/completions`, { method: "POST", headers: neraHeaders(apiKey), body: JSON.stringify(payload), signal: AbortSignal.timeout(timeoutMs) });
 }
 
 async function askNeraStream({ messages, mode, log, jid, sessionId, onVisibleText, onThinking }) {
@@ -195,45 +161,45 @@ async function askNeraStream({ messages, mode, log, jid, sessionId, onVisibleTex
   const model = String(process.env.NERA_AI_MODEL || "Nera-Plus.5").trim() || "Nera-Plus.5";
   const apiKey = String(process.env.NERA_AI_API_KEY || "").trim();
   const timeoutMs = Number(process.env.NERA_AI_TIMEOUT_MS || 120000);
-
   log?.("ai_request", { jid, sessionId, model, mode, stream: true, historyMessages: Math.max(0, messages.length - 1) });
-  let response = await doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, includeModel: true });
-  if (response.status === 403) {
-    const firstBody = await response.text().catch(() => "");
-    log?.("ai_403", { jid, sessionId, withModel: true, body: firstBody.slice(0, 1000) });
-    response = await doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, includeModel: false });
-  }
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    log?.("ai_http_error", { jid, sessionId, status: response.status, body: body.slice(0, 1000) });
-    let detail = body;
-    try { const data = JSON.parse(body); detail = data?.error?.message || data?.message || body; } catch {}
-    throw new Error(detail || `Nera API ${response.status}`);
-  }
-  if (!response.body) throw new Error("Nera SSE tidak mengirim response body.");
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "", rawAnswer = "";
+  let r = await doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, includeModel: true });
+  if (r.status === 403) {
+    const b = await r.text().catch(() => "");
+    log?.("ai_403", { jid, sessionId, withModel: true, contentType: r.headers.get("content-type") || "", body: b.slice(0, 1200) });
+    r = await doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, includeModel: false });
+  }
+  if (!r.ok) {
+    const b = await r.text().catch(() => "");
+    const ct = r.headers.get("content-type") || "";
+    log?.("ai_http_error", { jid, sessionId, status: r.status, contentType: ct, html: isHtml(b, ct), body: b.slice(0, 1600) });
+    throw safeHttpError(r.status, b, ct);
+  }
+  const ct = r.headers.get("content-type") || "";
+  if (ct.toLowerCase().includes("text/html")) {
+    const b = await r.text().catch(() => "");
+    log?.("ai_invalid_content_type", { jid, sessionId, status: r.status, contentType: ct, body: b.slice(0, 1600) });
+    throw safeHttpError(r.status, b, ct);
+  }
+  if (!r.body) throw new Error("Nera SSE tidak mengirim response body.");
+
+  const reader = r.body.getReader(); const decoder = new TextDecoder();
+  let buffer = "", raw = "";
   while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
+    const { value, done } = await reader.read(); if (done) break;
     buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
-    let split;
-    while ((split = buffer.indexOf("\n\n")) !== -1) {
-      const block = buffer.slice(0, split);
-      buffer = buffer.slice(split + 2);
+    let i;
+    while ((i = buffer.indexOf("\n\n")) !== -1) {
+      const block = buffer.slice(0, i); buffer = buffer.slice(i + 2);
       const { event, data } = parseSseBlock(block);
       if (!data || data === "[DONE]") continue;
       if (event === "thinking" || event === "reasoning") { onThinking?.(); continue; }
-      const piece = extractSseText(data);
-      if (!piece.text) continue;
-      if (piece.type === "full") rawAnswer = piece.text; else rawAnswer += piece.text;
-      const visible = stripHiddenReasoning(rawAnswer);
-      if (visible) onVisibleText?.(visible); else onThinking?.();
+      const piece = extractSseText(data); if (!piece.text) continue;
+      raw = piece.type === "full" ? piece.text : raw + piece.text;
+      const visible = stripHiddenReasoning(raw); if (visible) onVisibleText?.(visible); else onThinking?.();
     }
   }
-  const answer = stripHiddenReasoning(rawAnswer);
+  const answer = stripHiddenReasoning(raw);
   if (!answer) throw new Error("Nera tidak mengirim balasan yang bisa ditampilkan.");
   log?.("ai_response", { jid, sessionId, model, mode, stream: true, text: answer });
   return answer;
@@ -246,97 +212,65 @@ export async function onMessagesDelete({ event, log }) { if (event?.jid && event
 export default async function neraAiPlugin({ sock, message, media, log }) {
   const jid = message?.key?.remoteJid;
   if (!jid || message?.key?.fromMe || jid === "status@broadcast") return;
-
-  const raw = String(getText(message)).trim();
-  const hasImage = media?.type === "image";
+  const raw = String(getText(message)).trim(); const hasImage = media?.type === "image";
   if (!raw && !hasImage) return;
 
-  const lower = raw.toLowerCase();
-  const identityInfo = getIdentity(message);
-  const session = getSession(identityInfo);
-
+  const lower = raw.toLowerCase(); const info = getIdentity(message); const session = getSession(info);
   const modeMatch = raw.match(/^\.?(?:mode|nera\s+mode)(?:\s+(cepat|pintar))?\s*$/i);
   if (modeMatch && !hasImage) {
     const requested = String(modeMatch[1] || "").toLowerCase();
-    if (!requested) {
-      await sock.sendMessage(jid, { text: `⚙️ *Mode Nera saat ini: ${session.mode || DEFAULT_MODE}*\n\n• *.mode cepat* — respons cepat\n• *.mode pintar* — penalaran lebih dalam` }, { quoted: message });
-      return;
-    }
-    setChatMode(identityInfo, requested);
-    await sock.sendMessage(jid, { text: requested === "pintar" ? "🧠 Mode Nera diubah ke *pintar*." : "⚡ Mode Nera diubah ke *cepat*." }, { quoted: message });
-    return;
+    if (!requested) { await sock.sendMessage(jid, { text: `⚙️ *Mode Nera saat ini: ${session.mode || DEFAULT_MODE}*\n\n• *.mode cepat* — respons cepat\n• *.mode pintar* — penalaran lebih dalam` }, { quoted: message }); return; }
+    setChatMode(info, requested);
+    await sock.sendMessage(jid, { text: requested === "pintar" ? "🧠 Mode Nera diubah ke *pintar*." : "⚡ Mode Nera diubah ke *cepat*." }, { quoted: message }); return;
   }
-
   if (!hasImage && /^\.(?:new|reset|newchat|lupain)\s*$/i.test(raw)) {
-    delete store.sessions[identityInfo.key];
-    store.sessions[identityInfo.key] = newSession(identityInfo, session.mode || DEFAULT_MODE);
-    saveStore();
-    await sock.sendMessage(jid, { text: "🆕 Sesi Nera baru dibuat." }, { quoted: message });
-    return;
+    delete store.sessions[info.key]; store.sessions[info.key] = newSession(info, session.mode || DEFAULT_MODE); saveStore();
+    await sock.sendMessage(jid, { text: "🆕 Sesi Nera baru dibuat." }, { quoted: message }); return;
   }
 
-  const commandMatch = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
+  const cmd = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
   const autoReply = String(process.env.WA_AI_AUTO_REPLY || "true").toLowerCase() !== "false";
-  if (!hasImage && !commandMatch && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
-
-  const prompt = commandMatch ? commandMatch[1].trim() : (raw || "Jelaskan gambar ini.");
-  const mode = session.mode || DEFAULT_MODE;
+  if (!hasImage && !cmd && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
+  const prompt = cmd ? cmd[1].trim() : (raw || "Jelaskan gambar ini."); const mode = session.mode || DEFAULT_MODE;
   let userContent;
   try { userContent = buildUserContent(prompt, media); }
-  catch (error) {
-    await sock.sendMessage(jid, { text: error.message }, { quoted: message }).catch(() => {});
-    return;
-  }
+  catch (e) { await sock.sendMessage(jid, { text: e.message }, { quoted: message }).catch(() => {}); return; }
 
-  const history = (session.messages || []).map((m) => ({ role: m.role, content: m.content }));
-  const messages = trimMessages([...history, { role: "user", content: userContent }]);
-
-  let placeholder = null, lastEditAt = 0, lastRendered = "", visibleStarted = false, thinkFrame = 0, thinkTimer = null;
-  const stopThinkingAnimation = () => { if (thinkTimer) clearInterval(thinkTimer); thinkTimer = null; };
-
+  const messages = trimMessages([...(session.messages || []).map(m => ({ role: m.role, content: m.content })), { role: "user", content: userContent }]);
+  let placeholder = null, lastEditAt = 0, lastRendered = "", visibleStarted = false, frame = 0, timer = null;
+  const stopAnim = () => { if (timer) clearInterval(timer); timer = null; };
   try {
     await sock.sendPresenceUpdate("composing", jid).catch(() => {});
-    const thinkingBase = hasImage ? "🖼️ Nera sedang melihat gambar" : (mode === "pintar" ? "🧠 Nera sedang berpikir" : "✨ Nera sedang menyiapkan jawaban");
-    placeholder = await sock.sendMessage(jid, { text: `${thinkingBase}.` }, { quoted: message });
-
-    const animateThinking = async () => {
+    const base = hasImage ? "🖼️ Nera sedang melihat gambar" : (mode === "pintar" ? "🧠 Nera sedang berpikir" : "✨ Nera sedang menyiapkan jawaban");
+    placeholder = await sock.sendMessage(jid, { text: `${base}.` }, { quoted: message });
+    timer = setInterval(() => {
       if (!placeholder?.key || visibleStarted) return;
-      thinkFrame = (thinkFrame + 1) % 3;
-      await sock.sendMessage(jid, { text: `${thinkingBase}${".".repeat(thinkFrame + 1)}`, edit: placeholder.key }).catch(() => {});
-    };
-    thinkTimer = setInterval(() => void animateThinking(), THINK_ANIMATION_MS);
-    thinkTimer.unref?.();
+      frame = (frame + 1) % 3;
+      void sock.sendMessage(jid, { text: `${base}${".".repeat(frame + 1)}`, edit: placeholder.key }).catch(() => {});
+    }, THINK_ANIMATION_MS); timer.unref?.();
 
-    const renderAnswer = async (text, force = false) => {
-      const clean = stripHiddenReasoning(text);
-      if (!clean || !placeholder?.key || clean === lastRendered) return;
-      visibleStarted = true;
-      stopThinkingAnimation();
+    const render = async (text, force = false) => {
+      const clean = stripHiddenReasoning(text); if (!clean || !placeholder?.key || clean === lastRendered) return;
+      visibleStarted = true; stopAnim();
       if (!force && Date.now() - lastEditAt < STREAM_EDIT_MS) return;
       lastEditAt = Date.now(); lastRendered = clean;
-      await sock.sendMessage(jid, { text: clean, edit: placeholder.key }).catch((e) => log?.("ai_stream_edit_error", { jid, error: e.message }));
+      await sock.sendMessage(jid, { text: clean, edit: placeholder.key }).catch(e => log?.("ai_stream_edit_error", { jid, error: e.message }));
     };
-
-    const answer = await askNeraStream({ messages, mode, log, jid, sessionId: session.id, onVisibleText: (visible) => void renderAnswer(visible), onThinking: () => {} });
-    await renderAnswer(answer, true);
-
-    // Jangan simpan base64 gambar ke memory. Simpan representasi teks yang ringan.
-    const memoryUserText = hasImage ? `[Gambar] ${prompt}` : prompt;
-    session.messages = trimMessages([...(session.messages || []), { role: "user", content: memoryUserText }, { role: "assistant", content: answer }]);
-    session.mode = mode;
-    session.updatedAt = Date.now();
-    session.chatJids = [...new Set([...(session.chatJids || []), jid, identityInfo.identity].filter(Boolean))];
-    saveStore();
-  } catch (error) {
-    stopThinkingAnimation();
-    const errorText = error?.message || String(error);
-    log?.("ai_error", { jid, identity: identityInfo.identity, sessionId: session.id, mode, error: errorText, text: prompt, hasImage });
-    console.error("[nera-ai]", errorText);
-    const friendly = errorText.includes("403") ? "Nera API menolak request (403). Cek log ai_403 di console bot." : `Nera sedang bermasalah: ${errorText.slice(0, 180)}`;
+    const answer = await askNeraStream({ messages, mode, log, jid, sessionId: session.id, onVisibleText: v => void render(v), onThinking: () => {} });
+    await render(answer, true);
+    session.messages = trimMessages([...(session.messages || []), { role: "user", content: hasImage ? `[Gambar] ${prompt}` : prompt }, { role: "assistant", content: answer }]);
+    session.mode = mode; session.updatedAt = Date.now(); session.chatJids = [...new Set([...(session.chatJids || []), jid, info.identity].filter(Boolean))]; saveStore();
+  } catch (e) {
+    stopAnim();
+    const err = e?.message || String(e);
+    log?.("ai_error", { jid, identity: info.identity, sessionId: session.id, mode, status: e?.status || null, code: e?.code || null, error: err, text: prompt, hasImage });
+    console.error("[nera-ai]", err);
+    let friendly = "Nera sedang bermasalah, coba lagi sebentar.";
+    if (e?.code === "NERA_GATEWAY_HTML") friendly = `Nera gateway sedang bermasalah (HTTP ${e.status || "?"}). Coba lagi sebentar.`;
+    else if (e?.status === 403 || err.includes("403")) friendly = "Nera API menolak request (403). Cek konfigurasi API/Cloudflare.";
     if (placeholder?.key) await sock.sendMessage(jid, { text: friendly, edit: placeholder.key }).catch(() => {});
     else await sock.sendMessage(jid, { text: friendly }, { quoted: message }).catch(() => {});
   } finally {
-    stopThinkingAnimation();
-    await sock.sendPresenceUpdate("paused", jid).catch(() => {});
+    stopAnim(); await sock.sendPresenceUpdate("paused", jid).catch(() => {});
   }
 }
