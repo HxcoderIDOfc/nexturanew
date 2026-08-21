@@ -10,7 +10,7 @@ import makeWASocket, {
 import qrcode from "qrcode";
 import { pushConsoleLog } from "./live-console.js";
 
-const SESSION_DIR = path.resolve(process.env.WA_SESSION_DIR || "/tmp/nextura-wa-session");
+const SESSION_DIR = path.resolve(process.env.WA_SESSION_DIR || "/tmp/axynera-wa-session");
 const PLUGIN_DIR = path.resolve(process.env.WA_PLUGIN_DIR || "./wa-plugins");
 const MEDIA_DIR = path.resolve(process.env.WA_MEDIA_DIR || path.join(SESSION_DIR, "media"));
 const PLUGIN_RELOAD_MS = Number(process.env.WA_PLUGIN_RELOAD_MS || 5000);
@@ -19,6 +19,7 @@ const AUTO_DOWNLOAD_IMAGES = String(process.env.WA_AUTO_DOWNLOAD_IMAGES || "true
 const AUTO_ONLINE = String(process.env.WA_AUTO_ONLINE || "true").toLowerCase() !== "false";
 const PRESENCE_INTERVAL_MS = Math.max(30000, Number(process.env.WA_PRESENCE_INTERVAL_MS || 60000));
 const ABOUT_UPDATE_MS = Math.max(60000, Number(process.env.WA_ABOUT_UPDATE_MS || 60000));
+const ABOUT_FORCE_REFRESH_MS = Math.max(120000, Number(process.env.WA_ABOUT_FORCE_REFRESH_MS || 300000));
 const ABOUT_PREFIX = String(process.env.WA_ABOUT_PREFIX || "🤖 Axynera Ai⌚ Aktif").trim();
 
 const state = {
@@ -33,6 +34,7 @@ const state = {
   autoDownloadImages: AUTO_DOWNLOAD_IMAGES,
   autoOnline: AUTO_ONLINE,
   about: null,
+  aboutLastSuccessAt: null,
   updatedAt: Date.now()
 };
 
@@ -42,6 +44,7 @@ let plugins = [];
 let reconnectTimer = null;
 let presenceTimer = null;
 let aboutTimer = null;
+let aboutKickTimers = [];
 
 function setState(patch = {}) {
   Object.assign(state, patch, { updatedAt: Date.now() });
@@ -74,17 +77,21 @@ function imageExtension(message) {
 
 function formatUptime(from = Date.now()) {
   const totalMinutes = Math.max(0, Math.floor((Date.now() - from) / 60000));
-  if (totalMinutes < 1) return "0 Menit";
-  const hours = Math.floor(totalMinutes / 60);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
   const minutes = totalMinutes % 60;
-  if (!hours) return `${minutes} Menit`;
-  if (!minutes) return `${hours} Jam`;
-  return `${hours} Jam ${minutes} Menit`;
+  const parts = [];
+  if (days) parts.push(`${days} Hari`);
+  if (hours) parts.push(`${hours} Jam`);
+  if (minutes || !parts.length) parts.push(`${minutes} Menit`);
+  return parts.join(" ");
 }
 
 function stopLiveProfileTimers() {
   if (presenceTimer) clearInterval(presenceTimer);
   if (aboutTimer) clearInterval(aboutTimer);
+  for (const timer of aboutKickTimers) clearTimeout(timer);
+  aboutKickTimers = [];
   presenceTimer = null;
   aboutTimer = null;
 }
@@ -98,28 +105,49 @@ async function updateOnlinePresence() {
   }
 }
 
-async function updateDynamicAbout() {
-  if (!sock || state.status !== "connected" || !state.connectedAt) return;
+async function updateDynamicAbout(force = false) {
+  if (!sock || state.status !== "connected" || !state.connectedAt) return false;
   const about = `${ABOUT_PREFIX} ${formatUptime(state.connectedAt)}`;
-  if (about === state.about) return;
-  try {
-    await sock.updateProfileStatus(about);
-    setState({ about });
-    pushConsoleLog("about_update", { text: about });
-  } catch (error) {
-    pushConsoleLog("about_error", { error: error.message, text: about });
+  const lastSuccess = Number(state.aboutLastSuccessAt || 0);
+  const shouldForce = force || !lastSuccess || Date.now() - lastSuccess >= ABOUT_FORCE_REFRESH_MS;
+  if (!shouldForce && about === state.about) return true;
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await sock.updateProfileStatus(about);
+      setState({ about, aboutLastSuccessAt: Date.now() });
+      pushConsoleLog("about_update", { text: about, attempt, force: shouldForce });
+      return true;
+    } catch (error) {
+      lastError = error;
+      pushConsoleLog("about_retry", { attempt, error: error.message, text: about });
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 1200 * attempt));
+    }
   }
+
+  pushConsoleLog("about_error", { error: lastError?.message || "unknown", text: about });
+  return false;
 }
 
 function startLiveProfileTimers() {
   stopLiveProfileTimers();
   void updateOnlinePresence();
-  void updateDynamicAbout();
+  void updateDynamicAbout(true);
+
+  // WhatsApp kadang belum siap menerima profile-status tepat saat socket baru open.
+  // Kick ulang setelah beberapa detik supaya About lebih konsisten muncul.
+  for (const delay of [5000, 15000]) {
+    const timer = setTimeout(() => void updateDynamicAbout(true), delay);
+    timer.unref?.();
+    aboutKickTimers.push(timer);
+  }
+
   if (AUTO_ONLINE) {
     presenceTimer = setInterval(() => void updateOnlinePresence(), PRESENCE_INTERVAL_MS);
     presenceTimer.unref?.();
   }
-  aboutTimer = setInterval(() => void updateDynamicAbout(), ABOUT_UPDATE_MS);
+  aboutTimer = setInterval(() => void updateDynamicAbout(false), ABOUT_UPDATE_MS);
   aboutTimer.unref?.();
 }
 
@@ -289,9 +317,7 @@ async function connectWhatsApp() {
     });
 
     sock.ev.on("messaging-history.set", async ({ lidPnMappings = [] }) => {
-      for (const mapping of lidPnMappings || []) {
-        await dispatchPluginHook("onLidMapping", { mapping });
-      }
+      for (const mapping of lidPnMappings || []) await dispatchPluginHook("onLidMapping", { mapping });
     });
 
     sock.ev.on("connection.update", async (update) => {
@@ -311,7 +337,8 @@ async function connectWhatsApp() {
           connectedAt: Date.now(),
           phone: id.split(":")[0] || null,
           lastError: null,
-          about: null
+          about: null,
+          aboutLastSuccessAt: null
         });
         startLiveProfileTimers();
         pushConsoleLog("connection", { status: "connected", text: "WhatsApp terhubung" });
@@ -360,7 +387,7 @@ export async function logoutWhatsApp() {
   try { await sock?.logout?.(); } catch {}
   try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch {}
   sock = null;
-  setState({ status: "logged_out", qr: null, qrDataUrl: null, phone: null, connectedAt: null, about: null });
+  setState({ status: "logged_out", qr: null, qrDataUrl: null, phone: null, connectedAt: null, about: null, aboutLastSuccessAt: null });
   pushConsoleLog("connection", { status: "logged_out", text: "Session WhatsApp dihapus" });
   scheduleReconnect();
   return getWhatsAppState();
