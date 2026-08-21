@@ -1,7 +1,7 @@
 {
-  "name": "nextura-whatsapp-bot",
+  "name": "axynera-whatsapp-bot",
   "version": "1.2.0",
-  "description": "Nextura WhatsApp bot dengan QR login, persistent session, auto-read, live console, plugin manager, plugin autoload, dan Nextura AI chat.",
+  "description": "Axynera WhatsApp bot dengan QR login, persistent session, auto-read, live console, plugin manager, plugin autoload, dan Nera AI chat.",
   "type": "module",
   "main": "start.js",
   "scripts": {
