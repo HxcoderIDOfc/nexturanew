@@ -47,10 +47,12 @@ function getIdentity(message) {
   const k = message?.key || {};
   const remote = norm(k.remoteJid);
   if (remote.endsWith("@g.us")) {
-    const p = canonical(firstLid([k.participant, k.participantAlt, k.senderLid, k.senderPn, k.participantPn]) || firstJid([k.participant, k.participantAlt, k.senderLid, k.senderPn, k.participantPn]) || "unknown");
+    const candidates = [k.participant, k.participantAlt, k.senderLid, k.senderPn, k.participantPn];
+    const p = canonical(firstLid(candidates) || firstJid(candidates) || "unknown");
     return { key: `group:${remote}|user:${p}`, identity: p, chatJid: remote, groupJid: remote };
   }
-  const id = canonical(firstLid([k.remoteJid, k.remoteJidAlt, k.senderLid, k.senderPn, k.participant, k.participantAlt]) || firstJid([k.remoteJid, k.remoteJidAlt, k.senderLid, k.senderPn, k.participant, k.participantAlt]) || remote);
+  const candidates = [k.remoteJid, k.remoteJidAlt, k.senderLid, k.senderPn, k.participant, k.participantAlt];
+  const id = canonical(firstLid(candidates) || firstJid(candidates) || remote);
   return { key: `dm:${id}`, identity: id, chatJid: remote || id, groupJid: null };
 }
 
@@ -130,8 +132,12 @@ function buildUserContent(prompt, media) {
   return [{ type: "text", text }, { type: "image_url", image_url: { url: `data:${media.mimetype || "image/jpeg"};base64,${b64}` } }];
 }
 
-function neraHeaders(apiKey) {
-  const h = { "Content-Type": "application/json", Accept: "text/event-stream", "User-Agent": "Axynera-WhatsApp-Bot/1.0" };
+function headers(apiKey, stream) {
+  const h = {
+    "Content-Type": "application/json",
+    Accept: stream ? "text/event-stream" : "application/json",
+    "User-Agent": "Axynera-WA-Bot/1.0"
+  };
   if (apiKey) h.Authorization = `Bearer ${apiKey}`;
   return h;
 }
@@ -141,8 +147,7 @@ function isHtml(body = "", contentType = "") {
 }
 function safeHttpError(status, body, contentType) {
   if (isHtml(body, contentType)) {
-    const e = new Error(`Nera gateway sedang bermasalah (HTTP ${status}).`);
-    e.code = "NERA_GATEWAY_HTML"; e.status = status; return e;
+    const e = new Error(`Nera gateway sedang bermasalah (HTTP ${status}).`); e.code = "NERA_GATEWAY_HTML"; e.status = status; return e;
   }
   try {
     const d = JSON.parse(body || "{}");
@@ -151,9 +156,34 @@ function safeHttpError(status, body, contentType) {
   } catch {}
   const e = new Error(`Nera API HTTP ${status}.`); e.status = status; return e;
 }
-async function doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, includeModel = true }) {
-  const payload = { mode, stream: true, messages }; if (includeModel && model) payload.model = model;
-  return fetch(`${baseUrl}/v1/chat/completions`, { method: "POST", headers: neraHeaders(apiKey), body: JSON.stringify(payload), signal: AbortSignal.timeout(timeoutMs) });
+async function doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, stream = true, includeModel = true }) {
+  const payload = { mode, stream, messages };
+  if (includeModel && model) payload.model = model;
+  return fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: headers(apiKey, stream),
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+}
+async function parseNonStreamResponse(r, { log, jid, sessionId, model, mode }) {
+  const body = await r.text().catch(() => "");
+  const ct = r.headers.get("content-type") || "";
+  if (!r.ok) {
+    log?.("ai_nonstream_error", { jid, sessionId, status: r.status, contentType: ct, body: body.slice(0, 1600) });
+    throw safeHttpError(r.status, body, ct);
+  }
+  if (isHtml(body, ct)) {
+    log?.("ai_nonstream_html", { jid, sessionId, status: r.status, contentType: ct, body: body.slice(0, 1600) });
+    throw safeHttpError(r.status, body, ct);
+  }
+  let data;
+  try { data = JSON.parse(body); }
+  catch { throw new Error("Nera non-stream mengirim JSON tidak valid."); }
+  const answer = stripHiddenReasoning(data?.choices?.[0]?.message?.content || data?.message?.content || data?.text || "");
+  if (!answer) throw new Error("Nera non-stream tidak mengirim jawaban.");
+  log?.("ai_response", { jid, sessionId, model, mode, stream: false, text: answer });
+  return answer;
 }
 
 async function askNeraStream({ messages, mode, log, jid, sessionId, onVisibleText, onThinking }) {
@@ -163,26 +193,30 @@ async function askNeraStream({ messages, mode, log, jid, sessionId, onVisibleTex
   const timeoutMs = Number(process.env.NERA_AI_TIMEOUT_MS || 120000);
   log?.("ai_request", { jid, sessionId, model, mode, stream: true, historyMessages: Math.max(0, messages.length - 1) });
 
-  let r = await doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, includeModel: true });
+  let r = await doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, stream: true, includeModel: true });
   if (r.status === 403) {
     const b = await r.text().catch(() => "");
     log?.("ai_403", { jid, sessionId, withModel: true, contentType: r.headers.get("content-type") || "", body: b.slice(0, 1200) });
-    r = await doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, includeModel: false });
+    r = await doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, stream: true, includeModel: false });
   }
-  if (!r.ok) {
+
+  if (!r.ok || (r.headers.get("content-type") || "").toLowerCase().includes("text/html")) {
     const b = await r.text().catch(() => "");
     const ct = r.headers.get("content-type") || "";
-    log?.("ai_http_error", { jid, sessionId, status: r.status, contentType: ct, html: isHtml(b, ct), body: b.slice(0, 1600) });
-    throw safeHttpError(r.status, b, ct);
-  }
-  const ct = r.headers.get("content-type") || "";
-  if (ct.toLowerCase().includes("text/html")) {
-    const b = await r.text().catch(() => "");
-    log?.("ai_invalid_content_type", { jid, sessionId, status: r.status, contentType: ct, body: b.slice(0, 1600) });
-    throw safeHttpError(r.status, b, ct);
-  }
-  if (!r.body) throw new Error("Nera SSE tidak mengirim response body.");
+    log?.("ai_stream_fallback", { jid, sessionId, status: r.status, contentType: ct, html: isHtml(b, ct), body: b.slice(0, 1600) });
 
+    let fallback = await doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, stream: false, includeModel: true });
+    if (fallback.status === 403) {
+      const fb = await fallback.text().catch(() => "");
+      log?.("ai_nonstream_403", { jid, sessionId, withModel: true, body: fb.slice(0, 1200) });
+      fallback = await doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, stream: false, includeModel: false });
+    }
+    const answer = await parseNonStreamResponse(fallback, { log, jid, sessionId, model, mode });
+    onVisibleText?.(answer);
+    return answer;
+  }
+
+  if (!r.body) throw new Error("Nera SSE tidak mengirim response body.");
   const reader = r.body.getReader(); const decoder = new TextDecoder();
   let buffer = "", raw = "";
   while (true) {
