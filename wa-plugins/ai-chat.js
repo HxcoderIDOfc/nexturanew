@@ -275,8 +275,8 @@ export default async function neraAiPlugin({ sock, message, media, log }) {
   const stopAnim = () => { if (timer) clearInterval(timer); timer = null; };
   try {
     await sock.sendPresenceUpdate("composing", jid).catch(() => {});
-    const base = hasImage ? "🖼️ Nera sedang melihat gambar" : (mode === "pintar" ? "🧠 Nera sedang berpikir" : "✨ Nera sedang menyiapkan jawaban");
-    placeholder = await sock.sendMessage(jid, { text: `${base}.` }, { quoted: message });
+    const base = hasImage ? "🖼️ Nera sedang melihat gambar" : "🧠 Nera sedang Berfikir";
+    placeholder = await sock.sendMessage(jid, { text: `${base}...` }, { quoted: message });
     timer = setInterval(() => {
       if (!placeholder?.key || visibleStarted) return;
       frame = (frame + 1) % 3;
@@ -284,14 +284,31 @@ export default async function neraAiPlugin({ sock, message, media, log }) {
     }, THINK_ANIMATION_MS); timer.unref?.();
 
     const render = async (text, force = false) => {
-      const clean = stripHiddenReasoning(text); if (!clean || !placeholder?.key || clean === lastRendered) return;
+      const clean = stripHiddenReasoning(text); if (!clean || clean === lastRendered) return true;
       visibleStarted = true; stopAnim();
-      if (!force && Date.now() - lastEditAt < STREAM_EDIT_MS) return;
+      if (!force && Date.now() - lastEditAt < STREAM_EDIT_MS) return true;
       lastEditAt = Date.now(); lastRendered = clean;
-      await sock.sendMessage(jid, { text: clean, edit: placeholder.key }).catch(e => log?.("ai_stream_edit_error", { jid, error: e.message }));
+      if (placeholder?.key) {
+        try {
+          await sock.sendMessage(jid, { text: clean, edit: placeholder.key });
+          return true;
+        } catch (e) {
+          log?.("ai_stream_edit_error", { jid, error: e.message });
+        }
+      }
+      try {
+        await sock.sendMessage(jid, { text: clean }, { quoted: message });
+        return true;
+      } catch (e) {
+        log?.("ai_send_fallback_error", { jid, error: e.message });
+        return false;
+      }
     };
+
     const answer = await askNeraStream({ messages, mode, log, jid, sessionId: session.id, onVisibleText: v => void render(v), onThinking: () => {} });
-    await render(answer, true);
+    const rendered = await render(answer, true);
+    if (!rendered) throw new Error("Jawaban Nera diterima, tetapi gagal dikirim ke WhatsApp.");
+
     session.messages = trimMessages([...(session.messages || []), { role: "user", content: hasImage ? `[Gambar] ${prompt}` : prompt }, { role: "assistant", content: answer }]);
     session.mode = mode; session.updatedAt = Date.now(); session.chatJids = [...new Set([...(session.chatJids || []), jid, info.identity].filter(Boolean))]; saveStore();
   } catch (e) {
@@ -302,8 +319,11 @@ export default async function neraAiPlugin({ sock, message, media, log }) {
     let friendly = "Nera sedang bermasalah, coba lagi sebentar.";
     if (e?.code === "NERA_GATEWAY_HTML") friendly = `Nera gateway sedang bermasalah (HTTP ${e.status || "?"}). Coba lagi sebentar.`;
     else if (e?.status === 403 || err.includes("403")) friendly = "Nera API menolak request (403). Cek konfigurasi API/Cloudflare.";
-    if (placeholder?.key) await sock.sendMessage(jid, { text: friendly, edit: placeholder.key }).catch(() => {});
-    else await sock.sendMessage(jid, { text: friendly }, { quoted: message }).catch(() => {});
+    let sent = false;
+    if (placeholder?.key) {
+      try { await sock.sendMessage(jid, { text: friendly, edit: placeholder.key }); sent = true; } catch {}
+    }
+    if (!sent) await sock.sendMessage(jid, { text: friendly }, { quoted: message }).catch(() => {});
   } finally {
     stopAnim(); await sock.sendPresenceUpdate("paused", jid).catch(() => {});
   }
