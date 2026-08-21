@@ -1,35 +1,189 @@
-# 📱 Nextura WhatsApp Bot
+# 📱 Axynera WhatsApp Bot
 
-Runtime WhatsApp Bot ringan berbasis **Baileys** dengan QR login, session persistent, auto-read, Plugin Manager, Live Console, auto-load plugin, health/uptime, dan integrasi AI melalui **Nextura API**.
+Runtime WhatsApp berbasis **Baileys** dengan QR login, session persistent, auto-read, auto reconnect, Plugin Manager, Live Console, Nera AI, SSE pseudo-streaming ke edit message WhatsApp, memory per user/LID, auto download gambar, online presence, dan About uptime otomatis.
 
-> Runtime AI gateway, terminal agent, sandbox, Puppeteer, PDF tools, dan engine lama sudah tidak dipakai.
-
-## ✨ Fitur
+## ✨ Fitur utama
 
 - 📲 QR WhatsApp di `/wa`
 - 💾 Session persistent lewat `WA_SESSION_DIR`
 - 👁️ Auto-read pesan masuk
-- 🧩 Auto-load plugin `.js` / `.mjs`
-- 📝 Upload, buat, edit, dan hapus plugin dari browser
-- 🖥️ Live Console untuk pesan masuk, balasan bot, request AI, response AI, dan error
-- 🔐 `/plugins` dan `/console` dilindungi `WA_ADMIN_KEY`
-- 🤖 AI Chat melalui `https://api.nextura.my.id`
-- 🔎 Model AI dapat dideteksi otomatis lewat `/v1/models`
 - ♻️ Auto reconnect WhatsApp
-- ❤️ Health 1–3 tetap tersedia
-- ⏱️ Uptime 1–3 tetap tersedia
+- 🟢 Auto presence online
+- ⌚ About otomatis: `🤖 Axynera Ai⌚ Aktif ...`
+- 🖼️ Auto-download gambar masuk
+- 🧩 Plugin `.js` / `.mjs` dengan hot reload
+- 🖥️ Live Console
+- 🔐 Plugin Manager + Console dilindungi `WA_ADMIN_KEY`
+- 🤖 Nera API: `https://api.axynera.my.id/v1/chat/completions`
+- ⚡ Mode `.mode cepat`
+- 🧠 Mode `.mode pintar`
+- 🌊 SSE `stream:true` lalu pesan WhatsApp diedit berkala
+- 🧠 Memory percakapan per user, prioritas LID
+- 🆕 `.new`, `.reset`, `.newchat`, `.lupain` untuk sesi baru
+- 🗑️ Memory di-reset jika event hapus chat diterima Baileys
+- ❤️ `/health`, `/uptime`, `/ping`
 
-## 🌐 Halaman & Endpoint
+## 🔐 Environment Variables
+
+Jangan menyimpan API key asli di GitHub.
+
+```env
+PORT=8000
+HOST=0.0.0.0
+
+WA_ADMIN_KEY=ganti-dengan-key-admin-yang-kuat
+
+# WhatsApp
+WA_AUTO_READ=true
+WA_AI_AUTO_REPLY=true
+WA_SESSION_DIR=/data/axynera-wa-session
+WA_PLUGIN_RELOAD_MS=5000
+WA_CONSOLE_MAX_LOGS=500
+
+# Media
+WA_AUTO_DOWNLOAD_IMAGES=true
+# WA_MEDIA_DIR=/data/axynera-wa-session/media
+
+# Presence + About
+WA_AUTO_ONLINE=true
+WA_PRESENCE_INTERVAL_MS=60000
+WA_ABOUT_UPDATE_MS=60000
+WA_ABOUT_PREFIX=🤖 Axynera Ai⌚ Aktif
+
+# Nera AI
+NERA_AI_BASE_URL=https://api.axynera.my.id
+NERA_AI_MODEL=Nera-Plus.5
+NERA_AI_DEFAULT_MODE=cepat
+NERA_AI_TIMEOUT_MS=120000
+NERA_AI_STREAM_EDIT_MS=1200
+NERA_AI_API_KEY=
+
+# Memory
+NERA_AI_MEMORY_TURNS=20
+# NERA_AI_MEMORY_FILE=/data/axynera-wa-session/nera-memory.json
+
+BODY_LIMIT_BYTES=2097152
+KEEP_ALIVE_TIMEOUT_MS=75000
+```
+
+> Jika environment Koyeb masih memiliki variable lama, nilai Koyeb akan mengalahkan `.env.example`. Hapus variable `NEXTURA_AI_*` lama dan gunakan hanya `NERA_AI_*` di atas.
+
+## 🤖 Request Nera
+
+Bot memakai endpoint:
 
 ```text
-GET  /                  halaman utama
-GET  /wa                QR + status WhatsApp
-GET  /wa/status         status koneksi
-POST /wa/restart        restart koneksi
-POST /wa/logout         logout session
+POST https://api.axynera.my.id/v1/chat/completions
+```
 
-GET  /plugins           Plugin Manager
-GET  /console           Live Console
+Payload utama:
+
+```json
+{
+  "model": "Nera-Plus.5",
+  "mode": "cepat",
+  "stream": true,
+  "messages": [
+    { "role": "user", "content": "Halo" }
+  ]
+}
+```
+
+Jika request dengan model mendapat HTTP 403, plugin memiliki retry kompatibilitas tanpa memaksa field `model`, sambil mencatat body error ke Live Console.
+
+## ⚡🧠 Mode AI
+
+```text
+.mode
+.mode cepat
+.mode pintar
+```
+
+Mode disimpan bersama sesi percakapan user.
+
+## 🧠 Memory per user / LID
+
+Memory disimpan default di:
+
+```text
+/data/axynera-wa-session/nera-memory.json
+```
+
+Bot memprioritaskan identitas WhatsApp **LID** bila tersedia, lalu melakukan fallback ke JID/nomor. Mapping PN ↔ LID dimigrasikan supaya history tidak pecah ketika format identitas berubah.
+
+Default maksimum:
+
+```env
+NERA_AI_MEMORY_TURNS=20
+```
+
+Artinya konteks terbaru dibatasi agar request AI tidak membesar tanpa batas.
+
+## 🌊 SSE di WhatsApp
+
+Nera tetap memakai SSE nyata di backend. WhatsApp tidak menampilkan token stream secara native, sehingga bot membuat efek streaming dengan cara:
+
+```text
+Nera SSE → kumpulkan delta → edit satu pesan WhatsApp berkala → jawaban final
+```
+
+Interval edit default:
+
+```env
+NERA_AI_STREAM_EDIT_MS=1200
+```
+
+Jawaban final yang lengkap saja yang disimpan ke memory.
+
+## 👁️ Auto-read
+
+Default:
+
+```env
+WA_AUTO_READ=true
+```
+
+Pesan live masuk ditandai sudah dibaca sebelum plugin memprosesnya.
+
+## 🖼️ Download gambar
+
+Default:
+
+```env
+WA_AUTO_DOWNLOAD_IMAGES=true
+```
+
+Gambar masuk disimpan ke folder media di dalam session persistent. Informasi file juga diteruskan ke plugin sehingga bisa dipakai untuk integrasi Nera Vision berikutnya.
+
+## 🟢 Presence & About uptime
+
+Default:
+
+```env
+WA_AUTO_ONLINE=true
+WA_PRESENCE_INTERVAL_MS=60000
+WA_ABOUT_UPDATE_MS=60000
+WA_ABOUT_PREFIX=🤖 Axynera Ai⌚ Aktif
+```
+
+Contoh About:
+
+```text
+🤖 Axynera Ai⌚ Aktif 2 Menit
+🤖 Axynera Ai⌚ Aktif 1 Jam 7 Menit
+```
+
+## 🌐 Endpoint
+
+```text
+GET  /
+GET  /wa
+GET  /wa/status
+POST /wa/restart
+POST /wa/logout
+
+GET  /plugins
+GET  /console
 
 GET    /api/plugins
 POST   /api/plugins
@@ -58,142 +212,15 @@ GET /uptime/3
 GET /ping
 ```
 
-## 🔐 Environment Variables
+## 💾 Persistent volume
 
-Jangan simpan API key asli di GitHub.
-
-```env
-PORT=8000
-HOST=0.0.0.0
-
-# Admin panel
-WA_ADMIN_KEY=ganti-dengan-password-admin-yang-kuat
-
-# WhatsApp
-WA_AUTO_READ=true
-WA_SESSION_DIR=/data/nextura-wa-session
-WA_PLUGIN_RELOAD_MS=5000
-WA_CONSOLE_MAX_LOGS=500
-
-# Opsional
-# WA_PLUGIN_DIR=/data/wa-plugins
-
-# Nextura AI
-NEXTURA_AI_BASE_URL=https://api.nextura.my.id
-NEXTURA_AI_API_KEY=masukkan-api-key-nextura
-
-# Opsional. Kosong = auto baca /v1/models
-NEXTURA_AI_MODEL=
-NEXTURA_AI_TIMEOUT_MS=120000
-```
-
-## 🤖 AI Chat Nextura
-
-Plugin `wa-plugins/ai-chat.js` memakai:
-
-```text
-POST https://api.nextura.my.id/v1/chat/completions
-```
-
-Jika `NEXTURA_AI_MODEL` kosong, plugin terlebih dahulu membaca:
-
-```text
-GET https://api.nextura.my.id/v1/models
-```
-
-lalu memilih model yang tersedia. Ini menghindari hardcode model yang bisa berubah.
-
-Contoh penggunaan WhatsApp:
-
-```text
-.ai Halo, siapa kamu?
-```
-
-atau:
-
-```text
-ai Jelaskan Cloudflare Workers
-```
-
-## 👁️ Auto-read
-
-Default:
+Gunakan volume `/data` dan set:
 
 ```env
-WA_AUTO_READ=true
+WA_SESSION_DIR=/data/axynera-wa-session
 ```
 
-Setiap pesan masuk akan ditandai sudah dibaca sebelum plugin memprosesnya. Untuk mematikan:
-
-```env
-WA_AUTO_READ=false
-```
-
-## 🖥️ Live Console
-
-Buka:
-
-```text
-https://DOMAIN-KAMU/console
-```
-
-Masukkan `WA_ADMIN_KEY`. Console refresh otomatis setiap sekitar 1 detik dan menampilkan:
-
-- pesan WhatsApp masuk;
-- pesan keluar dari bot;
-- prompt yang dikirim ke Nextura AI;
-- model AI yang dipakai;
-- jawaban AI;
-- status koneksi;
-- plugin error / API error.
-
-Log console disimpan sementara di memory dan dibatasi oleh `WA_CONSOLE_MAX_LOGS`.
-
-## 🧩 Plugin Manager
-
-Buka:
-
-```text
-https://DOMAIN-KAMU/plugins
-```
-
-Masukkan `WA_ADMIN_KEY`. Kamu bisa upload, buat, edit, simpan, dan hapus plugin langsung dari browser.
-
-Contoh plugin:
-
-```js
-export default async function plugin({ sock, message, log }) {
-  const jid = message?.key?.remoteJid;
-  if (!jid || message?.key?.fromMe) return;
-
-  log?.("plugin_info", { jid, text: "Plugin jalan" });
-}
-```
-
-## 💾 Session WhatsApp Persistent
-
-Gunakan persistent volume yang di-mount ke `/data`, lalu:
-
-```env
-WA_SESSION_DIR=/data/nextura-wa-session
-```
-
-Selama folder tersebut tidak hilang, bot dapat memakai session lama setelah restart/redeploy tanpa scan QR lagi.
-
-## ❤️ Health & Uptime
-
-Route monitoring lama tetap ada:
-
-```text
-/health-1
-/health-2
-/health-3
-/uptime-1
-/uptime-2
-/uptime-3
-```
-
-Selain itu ada `/health`, `/uptime`, `/ping`, serta alias `/health/1..3` dan `/uptime/1..3`.
+Folder ini menyimpan auth WhatsApp, memory Nera, dan media yang diunduh. Selama volume tetap tersedia, bot dapat memakai session lama setelah restart/redeploy tanpa scan QR ulang.
 
 ## 🚀 Menjalankan
 
@@ -201,37 +228,28 @@ Node.js minimum **22**.
 
 ```bash
 npm install
+npm run check
 npm start
 ```
 
-Untuk cek syntax:
-
-```bash
-npm run check
-```
-
-## ☁️ Docker / Deploy
-
-Dockerfile sekarang dibuat ringan dan tidak lagi meng-install Chromium/Puppeteer/font stack lama.
+Untuk hosting seperti Koyeb:
 
 ```text
 Start command : npm start
 Health check  : /health
-Port          : PORT dari hosting, default 8000
+Port          : PORT, default 8000
 ```
-
-`WORKDIR /app` pada Docker adalah normal. Jika log npm menulis `npm error path /app`, baris itu hanya menunjukkan direktori kerja; lihat baris error tepat di atas/bawahnya untuk penyebab spesifik. Dockerfile saat ini sudah disederhanakan agar instalasi dependency lebih ringan.
 
 ## 📁 Struktur
 
 ```text
-start.js               bootstrap session path
+start.js               bootstrap Axynera session path
 sdk-compat.js          web server, QR, Plugin Manager, Live Console, health/uptime
-whatsapp-bot.js        Baileys, auto-read, session, reconnect, plugin loader
-live-console.js        ring buffer log Live Console
+whatsapp-bot.js        Baileys, auto-read, presence, media, reconnect, plugin loader
+live-console.js        ring buffer Live Console
 wa-plugins/
 ├── ping.js
-└── ai-chat.js
+└── ai-chat.js         Nera SSE + mode + memory per LID/JID
 ```
 
 ## 🔒 Keamanan
@@ -239,9 +257,10 @@ wa-plugins/
 - Jangan commit API key.
 - Gunakan `WA_ADMIN_KEY` panjang dan acak.
 - Jangan bagikan akses `/plugins` atau `/console` beserta admin key.
-- Isi Live Console dapat memuat percakapan WhatsApp, jadi perlakukan sebagai data privat.
-- Jangan upload plugin yang tidak dipercaya karena plugin berjalan di proses Node.js bot.
+- Live Console dapat memuat percakapan WhatsApp.
+- Plugin berjalan di proses Node.js bot, jadi hanya pasang kode yang dipercaya.
+- Baileys bukan API resmi WhatsApp; gunakan secara wajar dan hindari spam/bulk messaging.
 
 ---
 
-**Nextura WhatsApp Bot** — ringan, modular, dan bisa dikelola dari browser. 🚀
+**Axynera WhatsApp Bot + Nera AI** 🚀
