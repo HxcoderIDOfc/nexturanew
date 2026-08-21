@@ -59,7 +59,15 @@ async function loadPlugins() {
         const stat = fs.statSync(full);
         const mod = await import(`${pathToFileURL(full).href}?v=${stat.mtimeMs}`);
         const handler = mod.default || mod.handler || mod.onMessage;
-        if (typeof handler === "function") loaded.push({ name: file, handler });
+        if (typeof handler === "function") {
+          loaded.push({
+            name: file,
+            handler,
+            onChatDelete: typeof mod.onChatDelete === "function" ? mod.onChatDelete : null,
+            onMessagesDelete: typeof mod.onMessagesDelete === "function" ? mod.onMessagesDelete : null,
+            onLidMapping: typeof mod.onLidMapping === "function" ? mod.onLidMapping : null
+          });
+        }
       } catch (error) {
         console.error(`[wa-plugin] gagal load ${file}:`, error.message);
         pushConsoleLog("plugin_error", { plugin: file, error: error.message });
@@ -90,6 +98,24 @@ async function dispatchPlugins(message) {
   }
 }
 
+async function dispatchPluginHook(hookName, payload = {}) {
+  for (const plugin of plugins) {
+    const hook = plugin?.[hookName];
+    if (typeof hook !== "function") continue;
+    try {
+      await hook({
+        sock,
+        ...payload,
+        state: getWhatsAppState,
+        log: (type, data = {}) => pushConsoleLog(type, { plugin: plugin.name, ...data })
+      });
+    } catch (error) {
+      console.error(`[wa-plugin] ${plugin.name} ${hookName} error:`, error.message);
+      pushConsoleLog("plugin_hook_error", { plugin: plugin.name, hook: hookName, error: error.message });
+    }
+  }
+}
+
 function scheduleReconnect() {
   clearTimeout(reconnectTimer);
   reconnectTimer = setTimeout(() => void connectWhatsApp(), 3000);
@@ -114,7 +140,8 @@ async function connectWhatsApp() {
     });
 
     sock.ev.on("creds.update", saveCreds);
-    sock.ev.on("messages.upsert", async ({ messages = [] }) => {
+
+    sock.ev.on("messages.upsert", async ({ messages = [], type }) => {
       for (const message of messages) {
         if (!message?.message) continue;
         const jid = message?.key?.remoteJid || "";
@@ -123,8 +150,13 @@ async function connectWhatsApp() {
         pushConsoleLog(fromMe ? "wa_out" : "wa_in", {
           jid,
           contact: jidLabel(jid),
+          upsertType: type || null,
           text: text || `[${Object.keys(message.message || {})[0] || "message"}]`
         });
+
+        // Hanya pesan live yang boleh memicu command/AI.
+        // History sync/append tidak dibalas ulang.
+        if (type !== "notify") continue;
 
         if (AUTO_READ && !fromMe && message?.key) {
           await sock.readMessages([message.key]).catch((error) => {
@@ -133,6 +165,28 @@ async function connectWhatsApp() {
         }
 
         await dispatchPlugins(message);
+      }
+    });
+
+    sock.ev.on("chats.delete", async (jids = []) => {
+      for (const jid of jids) {
+        pushConsoleLog("chat_delete", { jid, contact: jidLabel(jid) });
+        await dispatchPluginHook("onChatDelete", { jid });
+      }
+    });
+
+    sock.ev.on("messages.delete", async (event) => {
+      await dispatchPluginHook("onMessagesDelete", { event });
+    });
+
+    sock.ev.on("lid-mapping.update", async (mapping) => {
+      pushConsoleLog("lid_mapping", { pn: mapping?.pn || null, lid: mapping?.lid || null });
+      await dispatchPluginHook("onLidMapping", { mapping });
+    });
+
+    sock.ev.on("messaging-history.set", async ({ lidPnMappings = [] }) => {
+      for (const mapping of lidPnMappings || []) {
+        await dispatchPluginHook("onLidMapping", { mapping });
       }
     });
 
