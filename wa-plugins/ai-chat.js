@@ -15,6 +15,7 @@ const DEFAULT_MODE = String(process.env.NERA_AI_DEFAULT_MODE || "cepat").toLower
 const MAX_TURNS = Math.max(2, Number(process.env.NERA_AI_MEMORY_TURNS || 20));
 const STREAM_EDIT_MS = Math.max(700, Number(process.env.NERA_AI_STREAM_EDIT_MS || 1200));
 const THINK_ANIMATION_MS = Math.max(700, Number(process.env.NERA_AI_THINK_ANIMATION_MS || 900));
+const MAX_IMAGE_BYTES = Math.max(256000, Number(process.env.NERA_AI_MAX_IMAGE_BYTES || 8 * 1024 * 1024));
 const SESSION_DIR = path.resolve(process.env.WA_SESSION_DIR || "/tmp/axynera-wa-session");
 const MEMORY_FILE = path.resolve(process.env.NERA_AI_MEMORY_FILE || path.join(SESSION_DIR, "nera-memory.json"));
 
@@ -63,14 +64,9 @@ function getIdentity(message) {
 function newSession(info, mode = DEFAULT_MODE) {
   const now = Date.now();
   return {
-    id: randomUUID(),
-    identity: info.identity,
+    id: randomUUID(), identity: info.identity,
     chatJids: [...new Set([info.chatJid, info.identity].filter(Boolean))],
-    groupJid: info.groupJid,
-    mode,
-    messages: [],
-    createdAt: now,
-    updatedAt: now
+    groupJid: info.groupJid, mode, messages: [], createdAt: now, updatedAt: now
   };
 }
 function getSession(info) {
@@ -107,10 +103,7 @@ function migrateAlias(pn, lid, log) {
   for (const [key, session] of Object.entries(store.sessions)) {
     if (!key.includes(`|user:${cleanPn}`)) continue;
     const migrated = key.replace(`|user:${cleanPn}`, `|user:${cleanLid}`);
-    if (!store.sessions[migrated]) {
-      session.identity = cleanLid;
-      store.sessions[migrated] = session;
-    }
+    if (!store.sessions[migrated]) { session.identity = cleanLid; store.sessions[migrated] = session; }
     delete store.sessions[key];
   }
   saveStore();
@@ -123,8 +116,7 @@ function resetSessionsForChat(jid, log) {
   for (const [key, session] of Object.entries(store.sessions)) {
     const chats = (session.chatJids || []).map(normalizeJid);
     if (key === `dm:${clean}` || key === `dm:${canonical}` || session.groupJid === clean || chats.includes(clean) || chats.includes(canonical)) {
-      delete store.sessions[key];
-      removed++;
+      delete store.sessions[key]; removed++;
     }
   }
   if (removed) saveStore();
@@ -147,10 +139,8 @@ function extractSseText(payload) {
     const data = JSON.parse(payload);
     const delta = data?.choices?.[0]?.delta?.content ?? data?.delta ?? data?.content?.delta;
     if (delta != null) return { type: "delta", text: String(delta) };
-
     const full = data?.choices?.[0]?.message?.content ?? data?.message?.content;
     if (full != null) return { type: "full", text: String(full) };
-
     if (typeof data?.text === "string") return { type: "delta", text: data.text };
     if (typeof data?.content === "string") return { type: "delta", text: data.content };
   } catch {}
@@ -159,20 +149,27 @@ function extractSseText(payload) {
 
 function stripHiddenReasoning(value = "") {
   let text = String(value || "");
-
-  // Buang blok reasoning lengkap.
   text = text.replace(/<think\b[^>]*>[\s\S]*?<\/think\s*>/gi, "");
   text = text.replace(/<reasoning\b[^>]*>[\s\S]*?<\/reasoning\s*>/gi, "");
   text = text.replace(/<analysis\b[^>]*>[\s\S]*?<\/analysis\s*>/gi, "");
-
-  // Saat streaming, opening tag bisa sudah datang sementara closing tag belum.
   text = text.replace(/<think\b[^>]*>[\s\S]*$/gi, "");
   text = text.replace(/<reasoning\b[^>]*>[\s\S]*$/gi, "");
   text = text.replace(/<analysis\b[^>]*>[\s\S]*$/gi, "");
-
-  // Bersihkan tag yatim jika upstream mengirim format rusak.
   text = text.replace(/<\/?(?:think|reasoning|analysis)\b[^>]*>/gi, "");
   return text.trim();
+}
+
+function buildUserContent(prompt, media) {
+  const text = String(prompt || "").trim() || (media?.type === "image" ? "Jelaskan gambar ini." : "Halo");
+  if (!media || media.type !== "image" || !media.path || !fs.existsSync(media.path)) return text;
+  const stat = fs.statSync(media.path);
+  if (stat.size > MAX_IMAGE_BYTES) throw new Error(`Gambar terlalu besar (${Math.ceil(stat.size / 1024 / 1024)} MB). Maksimal ${Math.floor(MAX_IMAGE_BYTES / 1024 / 1024)} MB.`);
+  const base64 = fs.readFileSync(media.path).toString("base64");
+  const mime = media.mimetype || "image/jpeg";
+  return [
+    { type: "text", text },
+    { type: "image_url", image_url: { url: `data:${mime};base64,${base64}` } }
+  ];
 }
 
 function neraHeaders(apiKey) {
@@ -189,10 +186,7 @@ async function doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs
   const payload = { mode, stream: true, messages };
   if (includeModel && model) payload.model = model;
   return fetch(`${baseUrl}/v1/chat/completions`, {
-    method: "POST",
-    headers: neraHeaders(apiKey),
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(timeoutMs)
+    method: "POST", headers: neraHeaders(apiKey), body: JSON.stringify(payload), signal: AbortSignal.timeout(timeoutMs)
   });
 }
 
@@ -204,102 +198,76 @@ async function askNeraStream({ messages, mode, log, jid, sessionId, onVisibleTex
 
   log?.("ai_request", { jid, sessionId, model, mode, stream: true, historyMessages: Math.max(0, messages.length - 1) });
   let response = await doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, includeModel: true });
-
   if (response.status === 403) {
     const firstBody = await response.text().catch(() => "");
     log?.("ai_403", { jid, sessionId, withModel: true, body: firstBody.slice(0, 1000) });
-    console.error("[nera-ai] 403 dengan model, retry payload kompatibel:", firstBody.slice(0, 500));
     response = await doNeraRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, includeModel: false });
   }
-
   if (!response.ok) {
     const body = await response.text().catch(() => "");
     log?.("ai_http_error", { jid, sessionId, status: response.status, body: body.slice(0, 1000) });
     let detail = body;
-    try {
-      const data = JSON.parse(body);
-      detail = data?.error?.message || data?.message || body;
-    } catch {}
+    try { const data = JSON.parse(body); detail = data?.error?.message || data?.message || body; } catch {}
     throw new Error(detail || `Nera API ${response.status}`);
   }
   if (!response.body) throw new Error("Nera SSE tidak mengirim response body.");
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
-  let rawAnswer = "";
-
+  let buffer = "", rawAnswer = "";
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
-
     let split;
     while ((split = buffer.indexOf("\n\n")) !== -1) {
       const block = buffer.slice(0, split);
       buffer = buffer.slice(split + 2);
       const { event, data } = parseSseBlock(block);
       if (!data || data === "[DONE]") continue;
-
-      if (event === "thinking" || event === "reasoning") {
-        onThinking?.();
-        continue;
-      }
-
+      if (event === "thinking" || event === "reasoning") { onThinking?.(); continue; }
       const piece = extractSseText(data);
       if (!piece.text) continue;
-
-      if (piece.type === "full") rawAnswer = piece.text;
-      else rawAnswer += piece.text;
-
+      if (piece.type === "full") rawAnswer = piece.text; else rawAnswer += piece.text;
       const visible = stripHiddenReasoning(rawAnswer);
-      if (visible) onVisibleText?.(visible);
-      else onThinking?.();
+      if (visible) onVisibleText?.(visible); else onThinking?.();
     }
   }
-
   const answer = stripHiddenReasoning(rawAnswer);
   if (!answer) throw new Error("Nera tidak mengirim balasan yang bisa ditampilkan.");
-
   log?.("ai_response", { jid, sessionId, model, mode, stream: true, text: answer });
   return answer;
 }
 
 export async function onLidMapping({ mapping, log }) { migrateAlias(mapping?.pn, mapping?.lid, log); }
 export async function onChatDelete({ jid, log }) { resetSessionsForChat(jid, log); }
-export async function onMessagesDelete({ event, log }) {
-  if (event?.jid && event?.all === true) resetSessionsForChat(event.jid, log);
-}
+export async function onMessagesDelete({ event, log }) { if (event?.jid && event?.all === true) resetSessionsForChat(event.jid, log); }
 
-export default async function neraAiPlugin({ sock, message, log }) {
+export default async function neraAiPlugin({ sock, message, media, log }) {
   const jid = message?.key?.remoteJid;
   if (!jid || message?.key?.fromMe || jid === "status@broadcast") return;
 
   const raw = String(getText(message)).trim();
-  if (!raw) return;
+  const hasImage = media?.type === "image";
+  if (!raw && !hasImage) return;
 
   const lower = raw.toLowerCase();
   const identityInfo = getIdentity(message);
   const session = getSession(identityInfo);
 
   const modeMatch = raw.match(/^\.?(?:mode|nera\s+mode)(?:\s+(cepat|pintar))?\s*$/i);
-  if (modeMatch) {
+  if (modeMatch && !hasImage) {
     const requested = String(modeMatch[1] || "").toLowerCase();
     if (!requested) {
-      await sock.sendMessage(jid, {
-        text: `⚙️ *Mode Nera saat ini: ${session.mode || DEFAULT_MODE}*\n\n• *.mode cepat* — respons cepat\n• *.mode pintar* — penalaran lebih dalam`
-      }, { quoted: message });
+      await sock.sendMessage(jid, { text: `⚙️ *Mode Nera saat ini: ${session.mode || DEFAULT_MODE}*\n\n• *.mode cepat* — respons cepat\n• *.mode pintar* — penalaran lebih dalam` }, { quoted: message });
       return;
     }
-
     setChatMode(identityInfo, requested);
-    await sock.sendMessage(jid, {
-      text: requested === "pintar" ? "🧠 Mode Nera diubah ke *pintar*." : "⚡ Mode Nera diubah ke *cepat*."
-    }, { quoted: message });
+    await sock.sendMessage(jid, { text: requested === "pintar" ? "🧠 Mode Nera diubah ke *pintar*." : "⚡ Mode Nera diubah ke *cepat*." }, { quoted: message });
     return;
   }
 
-  if (/^\.(?:new|reset|newchat|lupain)\s*$/i.test(raw)) {
+  if (!hasImage && /^\.(?:new|reset|newchat|lupain)\s*$/i.test(raw)) {
     delete store.sessions[identityInfo.key];
     store.sessions[identityInfo.key] = newSession(identityInfo, session.mode || DEFAULT_MODE);
     saveStore();
@@ -309,73 +277,52 @@ export default async function neraAiPlugin({ sock, message, log }) {
 
   const commandMatch = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
   const autoReply = String(process.env.WA_AI_AUTO_REPLY || "true").toLowerCase() !== "false";
-  if (!commandMatch && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
+  if (!hasImage && !commandMatch && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
 
-  const prompt = commandMatch ? commandMatch[1].trim() : raw;
-  if (!prompt) return;
-
+  const prompt = commandMatch ? commandMatch[1].trim() : (raw || "Jelaskan gambar ini.");
   const mode = session.mode || DEFAULT_MODE;
-  const messages = trimMessages([...(session.messages || []), { role: "user", content: prompt }]);
+  let userContent;
+  try { userContent = buildUserContent(prompt, media); }
+  catch (error) {
+    await sock.sendMessage(jid, { text: error.message }, { quoted: message }).catch(() => {});
+    return;
+  }
 
-  let placeholder = null;
-  let lastEditAt = 0;
-  let lastRendered = "";
-  let visibleStarted = false;
-  let thinkFrame = 0;
-  let thinkTimer = null;
+  const history = (session.messages || []).map((m) => ({ role: m.role, content: m.content }));
+  const messages = trimMessages([...history, { role: "user", content: userContent }]);
 
-  const stopThinkingAnimation = () => {
-    if (thinkTimer) clearInterval(thinkTimer);
-    thinkTimer = null;
-  };
+  let placeholder = null, lastEditAt = 0, lastRendered = "", visibleStarted = false, thinkFrame = 0, thinkTimer = null;
+  const stopThinkingAnimation = () => { if (thinkTimer) clearInterval(thinkTimer); thinkTimer = null; };
 
   try {
     await sock.sendPresenceUpdate("composing", jid).catch(() => {});
-
-    const thinkingBase = mode === "pintar" ? "🧠 Nera sedang berpikir" : "✨ Nera sedang menyiapkan jawaban";
+    const thinkingBase = hasImage ? "🖼️ Nera sedang melihat gambar" : (mode === "pintar" ? "🧠 Nera sedang berpikir" : "✨ Nera sedang menyiapkan jawaban");
     placeholder = await sock.sendMessage(jid, { text: `${thinkingBase}.` }, { quoted: message });
 
     const animateThinking = async () => {
       if (!placeholder?.key || visibleStarted) return;
       thinkFrame = (thinkFrame + 1) % 3;
-      const dots = ".".repeat(thinkFrame + 1);
-      await sock.sendMessage(jid, { text: `${thinkingBase}${dots}`, edit: placeholder.key }).catch(() => {});
+      await sock.sendMessage(jid, { text: `${thinkingBase}${".".repeat(thinkFrame + 1)}`, edit: placeholder.key }).catch(() => {});
     };
-
     thinkTimer = setInterval(() => void animateThinking(), THINK_ANIMATION_MS);
     thinkTimer.unref?.();
 
     const renderAnswer = async (text, force = false) => {
       const clean = stripHiddenReasoning(text);
       if (!clean || !placeholder?.key || clean === lastRendered) return;
-
       visibleStarted = true;
       stopThinkingAnimation();
-
       if (!force && Date.now() - lastEditAt < STREAM_EDIT_MS) return;
-      lastEditAt = Date.now();
-      lastRendered = clean;
-      await sock.sendMessage(jid, { text: clean, edit: placeholder.key }).catch((e) => {
-        log?.("ai_stream_edit_error", { jid, error: e.message });
-      });
+      lastEditAt = Date.now(); lastRendered = clean;
+      await sock.sendMessage(jid, { text: clean, edit: placeholder.key }).catch((e) => log?.("ai_stream_edit_error", { jid, error: e.message }));
     };
 
-    const answer = await askNeraStream({
-      messages,
-      mode,
-      log,
-      jid,
-      sessionId: session.id,
-      onVisibleText: (visible) => void renderAnswer(visible),
-      onThinking: () => {
-        // Sengaja tidak menampilkan isi reasoning dari upstream.
-        // User hanya melihat animasi generic supaya tidak terlihat stuck.
-      }
-    });
-
+    const answer = await askNeraStream({ messages, mode, log, jid, sessionId: session.id, onVisibleText: (visible) => void renderAnswer(visible), onThinking: () => {} });
     await renderAnswer(answer, true);
 
-    session.messages = trimMessages([...messages, { role: "assistant", content: answer }]);
+    // Jangan simpan base64 gambar ke memory. Simpan representasi teks yang ringan.
+    const memoryUserText = hasImage ? `[Gambar] ${prompt}` : prompt;
+    session.messages = trimMessages([...(session.messages || []), { role: "user", content: memoryUserText }, { role: "assistant", content: answer }]);
     session.mode = mode;
     session.updatedAt = Date.now();
     session.chatJids = [...new Set([...(session.chatJids || []), jid, identityInfo.identity].filter(Boolean))];
@@ -383,25 +330,11 @@ export default async function neraAiPlugin({ sock, message, log }) {
   } catch (error) {
     stopThinkingAnimation();
     const errorText = error?.message || String(error);
-    log?.("ai_error", {
-      jid,
-      identity: identityInfo.identity,
-      sessionId: session.id,
-      mode,
-      error: errorText,
-      text: prompt
-    });
+    log?.("ai_error", { jid, identity: identityInfo.identity, sessionId: session.id, mode, error: errorText, text: prompt, hasImage });
     console.error("[nera-ai]", errorText);
-
-    const friendly = errorText.includes("403")
-      ? "Nera API menolak request (403). Cek log ai_403 di console bot."
-      : "Nera sedang bermasalah, coba lagi sebentar.";
-
-    if (placeholder?.key) {
-      await sock.sendMessage(jid, { text: friendly, edit: placeholder.key }).catch(() => {});
-    } else {
-      await sock.sendMessage(jid, { text: friendly }, { quoted: message }).catch(() => {});
-    }
+    const friendly = errorText.includes("403") ? "Nera API menolak request (403). Cek log ai_403 di console bot." : `Nera sedang bermasalah: ${errorText.slice(0, 180)}`;
+    if (placeholder?.key) await sock.sendMessage(jid, { text: friendly, edit: placeholder.key }).catch(() => {});
+    else await sock.sendMessage(jid, { text: friendly }, { quoted: message }).catch(() => {});
   } finally {
     stopThinkingAnimation();
     await sock.sendPresenceUpdate("paused", jid).catch(() => {});
