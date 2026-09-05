@@ -187,8 +187,8 @@ async function parseNonStreamResponse(r, { log, jid, sessionId, model, mode }) {
 }
 
 async function askNeraStream({ messages, mode, log, jid, sessionId, onVisibleText, onThinking }) {
-  const baseUrl = String(process.env.NERA_AI_BASE_URL || "https://api.axynera.my.id").replace(/\/+$/, "");
-  const model = String(process.env.NERA_AI_MODEL || "Nera-Plus.5").trim() || "Nera-Plus.5";
+  const baseUrl = String(process.env.NERA_AI_BASE_URL || "https://axyai-router.akuanakkampoeng.workers.dev").replace(/\/+$/, "");
+  const model = String(process.env.NERA_AI_MODEL || "Axyai").trim() || "Axyai";
   const apiKey = String(process.env.NERA_AI_API_KEY || "").trim();
   const timeoutMs = Number(process.env.NERA_AI_TIMEOUT_MS || 120000);
   log?.("ai_request", { jid, sessionId, model, mode, stream: true, historyMessages: Math.max(0, messages.length - 1) });
