@@ -1,7 +1,7 @@
 {
   "name": "axynera-whatsapp-bot",
   "version": "1.2.0",
-  "description": "Axynera WhatsApp bot dengan QR login, persistent session, auto-read, live console, plugin manager, plugin autoload, dan Nera AI chat.",
+  "description": "Axynera WhatsApp bot dengan QR login, persistent session, auto-read, live console, plugin manager, plugin autoload, dan Axyai chat.",
   "type": "module",
   "main": "start.js",
   "scripts": {
@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.18",
+    "link-preview-js": "^3.0.12",
     "qrcode": "^1.5.4"
   }
 }
