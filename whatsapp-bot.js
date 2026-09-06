@@ -22,6 +22,17 @@ const ABOUT_UPDATE_MS = Math.max(60000, Number(process.env.WA_ABOUT_UPDATE_MS ||
 const ABOUT_FORCE_REFRESH_MS = Math.max(120000, Number(process.env.WA_ABOUT_FORCE_REFRESH_MS || 300000));
 const ABOUT_PREFIX = String(process.env.WA_ABOUT_PREFIX || "🤖 Axynera Ai⌚ Aktif").trim();
 
+// Baileys default query timeout terlalu ketat untuk hosting dengan latency tinggi ke server WA.
+// Ini yang menyebabkan "unexpected error in 'init queries'" (fetchProps timeout) di awal koneksi.
+const QUERY_TIMEOUT_MS = Math.max(30000, Number(process.env.WA_QUERY_TIMEOUT_MS || 60000));
+const CONNECT_TIMEOUT_MS = Math.max(30000, Number(process.env.WA_CONNECT_TIMEOUT_MS || 60000));
+const KEEPALIVE_MS = Math.max(10000, Number(process.env.WA_KEEPALIVE_MS || 20000));
+
+// Reconnect backoff: mulai pendek, naik bertahap, dengan batas atas.
+// Mencegah bot nge-spam reconnect saat WA sedang throttle/conflict berulang.
+const RECONNECT_BASE_MS = Math.max(1000, Number(process.env.WA_RECONNECT_BASE_MS || 3000));
+const RECONNECT_MAX_MS = Math.max(RECONNECT_BASE_MS, Number(process.env.WA_RECONNECT_MAX_MS || 60000));
+
 const state = {
   status: "starting",
   qr: null,
@@ -45,6 +56,13 @@ let reconnectTimer = null;
 let presenceTimer = null;
 let aboutTimer = null;
 let aboutKickTimers = [];
+
+// Guard krusial: mencegah dua connectWhatsApp() berjalan bersamaan.
+// Tanpa ini, close-event yang beruntun (mis. karena conflict) bisa memicu
+// beberapa makeWASocket() sekaligus memakai sesi yang sama -> saling bentrok -> conflict lagi.
+let isConnecting = false;
+let connectGeneration = 0;
+let reconnectAttempts = 0;
 
 function setState(patch = {}) {
   Object.assign(state, patch, { updatedAt: Date.now() });
@@ -247,14 +265,51 @@ async function dispatchPluginHook(hookName, payload = {}) {
   }
 }
 
+// Backoff eksponensial dengan batas atas, plus sedikit jitter supaya tidak selalu presisi sama.
+function nextReconnectDelay() {
+  const exp = RECONNECT_BASE_MS * Math.pow(2, Math.min(reconnectAttempts, 6));
+  const capped = Math.min(exp, RECONNECT_MAX_MS);
+  const jitter = Math.floor(Math.random() * Math.min(1000, capped * 0.2));
+  return capped + jitter;
+}
+
 function scheduleReconnect() {
   clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(() => void connectWhatsApp(), 3000);
+  const delay = nextReconnectDelay();
+  reconnectAttempts += 1;
+  pushConsoleLog("reconnect_scheduled", { delay, attempt: reconnectAttempts });
+  reconnectTimer = setTimeout(() => void connectWhatsApp(), delay);
+  reconnectTimer.unref?.();
+}
+
+// Menutup socket lama secara bersih sebelum membuat yang baru.
+// Tanpa ini, socket lama tetap "hidup" secara logis di memori (event listener dsb)
+// walau koneksinya sendiri sudah putus dari sisi server -> berkontribusi ke conflict berikutnya.
+async function teardownSocket(reason = "teardown") {
+  stopLiveProfileTimers();
+  if (!sock) return;
+  const old = sock;
+  sock = null;
+  try {
+    old.ev.removeAllListeners();
+  } catch {}
+  try {
+    old.end?.(new Error(reason));
+  } catch {}
 }
 
 async function connectWhatsApp() {
+  // Guard utama: kalau sudah ada proses connect yang berjalan, jangan mulai yang baru.
+  if (isConnecting) {
+    pushConsoleLog("connect_skipped", { reason: "already_connecting" });
+    return;
+  }
+  isConnecting = true;
+  clearTimeout(reconnectTimer);
+  const myGeneration = ++connectGeneration;
+
   try {
-    stopLiveProfileTimers();
+    await teardownSocket("reconnect");
     fs.mkdirSync(SESSION_DIR, { recursive: true });
     fs.mkdirSync(MEDIA_DIR, { recursive: true });
     await loadPlugins();
@@ -263,18 +318,31 @@ async function connectWhatsApp() {
     const { state: authState, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
     const { version } = await fetchLatestBaileysVersion();
 
-    sock = makeWASocket({
+    // Kalau selama await di atas ada connect lain yang sudah start duluan (seharusnya tidak terjadi
+    // karena isConnecting guard, tapi ini jaga-jaga terhadap race saat restartWhatsApp() manual dipanggil),
+    // batalkan generasi ini supaya tidak bikin socket ganda.
+    if (myGeneration !== connectGeneration) {
+      pushConsoleLog("connect_aborted", { reason: "stale_generation" });
+      return;
+    }
+
+    const newSock = makeWASocket({
       version,
       auth: authState,
       printQRInTerminal: false,
       syncFullHistory: false,
       markOnlineOnConnect: AUTO_ONLINE,
-      browser: ["Axynera AI", "Chrome", "1.0.0"]
+      browser: ["Axynera AI", "Chrome", "1.0.0"],
+      defaultQueryTimeoutMs: QUERY_TIMEOUT_MS,
+      connectTimeoutMs: CONNECT_TIMEOUT_MS,
+      keepAliveIntervalMs: KEEPALIVE_MS
     });
+    sock = newSock;
 
-    sock.ev.on("creds.update", saveCreds);
+    newSock.ev.on("creds.update", saveCreds);
 
-    sock.ev.on("messages.upsert", async ({ messages = [], type }) => {
+    newSock.ev.on("messages.upsert", async ({ messages = [], type }) => {
+      if (sock !== newSock) return; // socket ini sudah digantikan, abaikan event basi
       for (const message of messages) {
         if (!message?.message) continue;
         const jid = message?.key?.remoteJid || "";
@@ -290,7 +358,7 @@ async function connectWhatsApp() {
         if (type !== "notify") continue;
 
         if (AUTO_READ && !fromMe && message?.key) {
-          await sock.readMessages([message.key]).catch((error) => {
+          await newSock.readMessages([message.key]).catch((error) => {
             pushConsoleLog("read_error", { jid, error: error.message });
           });
         }
@@ -300,27 +368,28 @@ async function connectWhatsApp() {
       }
     });
 
-    sock.ev.on("chats.delete", async (jids = []) => {
+    newSock.ev.on("chats.delete", async (jids = []) => {
       for (const jid of jids) {
         pushConsoleLog("chat_delete", { jid, contact: jidLabel(jid) });
         await dispatchPluginHook("onChatDelete", { jid });
       }
     });
 
-    sock.ev.on("messages.delete", async (event) => {
+    newSock.ev.on("messages.delete", async (event) => {
       await dispatchPluginHook("onMessagesDelete", { event });
     });
 
-    sock.ev.on("lid-mapping.update", async (mapping) => {
+    newSock.ev.on("lid-mapping.update", async (mapping) => {
       pushConsoleLog("lid_mapping", { pn: mapping?.pn || null, lid: mapping?.lid || null });
       await dispatchPluginHook("onLidMapping", { mapping });
     });
 
-    sock.ev.on("messaging-history.set", async ({ lidPnMappings = [] }) => {
+    newSock.ev.on("messaging-history.set", async ({ lidPnMappings = [] }) => {
       for (const mapping of lidPnMappings || []) await dispatchPluginHook("onLidMapping", { mapping });
     });
 
-    sock.ev.on("connection.update", async (update) => {
+    newSock.ev.on("connection.update", async (update) => {
+      if (sock !== newSock) return; // event dari socket lama yang sudah digantikan
       const { connection, lastDisconnect, qr } = update;
       if (qr) {
         let qrDataUrl = null;
@@ -329,7 +398,8 @@ async function connectWhatsApp() {
         pushConsoleLog("connection", { status: "qr", text: "QR WhatsApp siap dipindai" });
       }
       if (connection === "open") {
-        const id = sock?.user?.id || "";
+        reconnectAttempts = 0; // reset backoff setelah berhasil connect
+        const id = newSock?.user?.id || "";
         setState({
           status: "connected",
           qr: null,
@@ -347,6 +417,8 @@ async function connectWhatsApp() {
         stopLiveProfileTimers();
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const loggedOut = statusCode === DisconnectReason.loggedOut;
+        const isConflict = statusCode === DisconnectReason.connectionReplaced
+          || String(lastDisconnect?.error?.message || "").toLowerCase().includes("conflict");
         setState({
           status: loggedOut ? "logged_out" : "disconnected",
           qr: null,
@@ -355,16 +427,19 @@ async function connectWhatsApp() {
         });
         pushConsoleLog("connection", {
           status: loggedOut ? "logged_out" : "disconnected",
-          text: lastDisconnect?.error?.message || "Koneksi WhatsApp terputus"
+          text: lastDisconnect?.error?.message || "Koneksi WhatsApp terputus",
+          conflict: isConflict
         });
+        if (sock === newSock) sock = null;
         if (!loggedOut) scheduleReconnect();
       }
     });
   } catch (error) {
-    stopLiveProfileTimers();
     setState({ status: "error", lastError: error.message || String(error) });
     pushConsoleLog("connection_error", { error: error.message || String(error) });
     scheduleReconnect();
+  } finally {
+    isConnecting = false;
   }
 }
 
@@ -373,22 +448,23 @@ export function getWhatsAppState() {
 }
 
 export async function restartWhatsApp() {
-  stopLiveProfileTimers();
-  try { sock?.end?.(new Error("manual restart")); } catch {}
-  sock = null;
+  clearTimeout(reconnectTimer);
+  await teardownSocket("manual restart");
   setState({ status: "restarting", qr: null, qrDataUrl: null });
   pushConsoleLog("connection", { status: "restarting", text: "Restart koneksi manual" });
+  reconnectAttempts = 0;
   await connectWhatsApp();
   return getWhatsAppState();
 }
 
 export async function logoutWhatsApp() {
-  stopLiveProfileTimers();
+  clearTimeout(reconnectTimer);
   try { await sock?.logout?.(); } catch {}
+  await teardownSocket("logout");
   try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch {}
-  sock = null;
   setState({ status: "logged_out", qr: null, qrDataUrl: null, phone: null, connectedAt: null, about: null, aboutLastSuccessAt: null });
   pushConsoleLog("connection", { status: "logged_out", text: "Session WhatsApp dihapus" });
+  reconnectAttempts = 0;
   scheduleReconnect();
   return getWhatsAppState();
 }
