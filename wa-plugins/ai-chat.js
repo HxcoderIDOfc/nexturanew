@@ -21,6 +21,17 @@ const MAX_IMAGE_BYTES = Math.max(256000, Number(process.env.AXYAI_MAX_IMAGE_BYTE
 const SESSION_DIR = path.resolve(process.env.WA_SESSION_DIR || "/tmp/axynera-wa-session");
 const MEMORY_FILE = path.resolve(process.env.AXYAI_MEMORY_FILE || path.join(SESSION_DIR, "axyai-memory.json"));
 
+// Timeout dipisah: request dengan gambar butuh waktu lebih lama di upstream vision model.
+const TEXT_TIMEOUT_MS = Number(process.env.AXYAI_TIMEOUT_MS || 120000);
+const IMAGE_TIMEOUT_MS = Number(process.env.AXYAI_IMAGE_TIMEOUT_MS || 180000);
+
+// PENTING: API key WAJIB di-set lewat environment variable, tidak ada fallback hardcoded.
+// Set di .env / process manager kamu: AXYAI_API_KEY=xxxx
+const AXYAI_API_KEY = String(process.env.AXYAI_API_KEY || "").trim();
+if (!AXYAI_API_KEY) {
+  console.error("[axyai-plugin] FATAL: AXYAI_API_KEY belum di-set di environment. Plugin tidak akan bisa memanggil Axyai API.");
+}
+
 function emptyStore() { return { version: 1, aliases: {}, sessions: {} }; }
 function loadStore() {
   try {
@@ -140,6 +151,7 @@ async function downloadWhatsAppImage(message, media) {
   }
 
   if (Buffer.isBuffer(media?.buffer)) {
+    if (media.buffer.length > MAX_IMAGE_BYTES) throw new Error(`Gambar terlalu besar. Maksimal ${Math.floor(MAX_IMAGE_BYTES / 1024 / 1024)} MB.`);
     return media.buffer.toString("base64");
   }
 
@@ -251,18 +263,22 @@ async function parseNonStreamResponse(r, { log, jid, sessionId, model, mode }) {
   return answer;
 }
 
-async function askAxyaiStream({ messages, mode, log, jid, sessionId, onVisibleText, onThinking }) {
+async function askAxyaiStream({ messages, mode, log, jid, sessionId, hasImage, onVisibleText, onThinking }) {
   const baseUrl = String(process.env.AXYAI_BASE_URL || "https://openai-gonka.akuanakkampoeng.workers.dev").replace(/\/+$/, "");
   const model = String(process.env.AXYAI_MODEL || "Axyai-Flash").trim() || "Axyai-Flash";
-  const apiKey = String(process.env.AXYAI_API_KEY || "axy-4f8c9b2e1a7d6f3c5b8e9a0f1c2d3e4f5a6b7c8d9e0f1a2b").trim();
-  const timeoutMs = Number(process.env.AXYAI_TIMEOUT_MS || 120000);
-  log?.("ai_request", { jid, sessionId, model, mode, stream: true, historyMessages: Math.max(0, messages.length - 1) });
 
-  let r = await doAxyaiRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, stream: true, includeModel: true });
+  if (!AXYAI_API_KEY) {
+    throw new Error("AXYAI_API_KEY belum di-set di environment. Set env var ini lalu restart bot.");
+  }
+
+  const timeoutMs = hasImage ? IMAGE_TIMEOUT_MS : TEXT_TIMEOUT_MS;
+  log?.("ai_request", { jid, sessionId, model, mode, stream: true, hasImage, timeoutMs, historyMessages: Math.max(0, messages.length - 1) });
+
+  let r = await doAxyaiRequest({ baseUrl, model, mode, messages, apiKey: AXYAI_API_KEY, timeoutMs, stream: true, includeModel: true });
   if (r.status === 403) {
     const b = await r.text().catch(() => "");
     log?.("ai_403", { jid, sessionId, withModel: true, contentType: r.headers.get("content-type") || "", body: b.slice(0, 1200) });
-    r = await doAxyaiRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, stream: true, includeModel: false });
+    r = await doAxyaiRequest({ baseUrl, model, mode, messages, apiKey: AXYAI_API_KEY, timeoutMs, stream: true, includeModel: false });
   }
 
   if (!r.ok || (r.headers.get("content-type") || "").toLowerCase().includes("text/html")) {
@@ -270,11 +286,11 @@ async function askAxyaiStream({ messages, mode, log, jid, sessionId, onVisibleTe
     const ct = r.headers.get("content-type") || "";
     log?.("ai_stream_fallback", { jid, sessionId, status: r.status, contentType: ct, html: isHtml(b, ct), body: b.slice(0, 1600) });
 
-    let fallback = await doAxyaiRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, stream: false, includeModel: true });
+    let fallback = await doAxyaiRequest({ baseUrl, model, mode, messages, apiKey: AXYAI_API_KEY, timeoutMs, stream: false, includeModel: true });
     if (fallback.status === 403) {
       const fb = await fallback.text().catch(() => "");
       log?.("ai_nonstream_403", { jid, sessionId, withModel: true, body: fb.slice(0, 1200) });
-      fallback = await doAxyaiRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, stream: false, includeModel: false });
+      fallback = await doAxyaiRequest({ baseUrl, model, mode, messages, apiKey: AXYAI_API_KEY, timeoutMs, stream: false, includeModel: false });
     }
     const answer = await parseNonStreamResponse(fallback, { log, jid, sessionId, model, mode });
     onVisibleText?.(answer);
@@ -313,7 +329,7 @@ export default async function axyaiPlugin({ sock, message, media, log }) {
   const jid = message?.key?.remoteJid;
   if (!jid || message?.key?.fromMe || jid === "status@broadcast") return;
   const raw = String(getText(message)).trim();
-  
+
   const hasDirectImage = Boolean(message?.message?.imageMessage);
   const hasQuotedImage = Boolean(message?.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage);
   const hasImage = hasDirectImage || hasQuotedImage || media?.type === "image";
@@ -335,28 +351,57 @@ export default async function axyaiPlugin({ sock, message, media, log }) {
 
   const cmd = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
   const autoReply = String(process.env.WA_AI_AUTO_REPLY || "true").toLowerCase() !== "false";
+
+  // Gambar tanpa caption & tanpa command hanya diproses jika auto-reply aktif ATAU ada caption/command eksplisit.
+  // Ini mencegah bot ikut "nyaut" gambar yang dikirim orang lain di grup tanpa diminta saat auto-reply off.
   if (!hasImage && !cmd && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
-  const prompt = cmd ? cmd[1].trim() : (raw || "Jelaskan gambar ini."); const mode = session.mode || DEFAULT_MODE;
-  
+  if (hasImage && !cmd && !raw && !autoReply) return;
+
+  const prompt = cmd ? cmd[1].trim() : (raw || "Jelaskan gambar ini.");
+  const mode = session.mode || DEFAULT_MODE;
+
   let userContent;
-  try { 
-    userContent = await buildUserContent(prompt, message, media); 
-  } catch (e) { 
-    await sock.sendMessage(jid, { text: e.message }, { quoted: message }).catch(() => {}); 
-    return; 
+  try {
+    userContent = await buildUserContent(prompt, message, media);
+  } catch (e) {
+    await sock.sendMessage(jid, { text: e.message }, { quoted: message }).catch(() => {});
+    return;
   }
 
   const messages = trimMessages([...(session.messages || []).map(m => ({ role: m.role, content: m.content })), { role: "user", content: userContent }]);
   let placeholder = null, lastEditAt = 0, lastRendered = "", visibleStarted = false, frame = 0, timer = null;
   const stopAnim = () => { if (timer) clearInterval(timer); timer = null; };
+
+  // Helper: kirim/edit pesan dengan aman, tandai kalau socket sudah putus supaya kita tidak
+  // terus mencoba mengirim ke koneksi yang mati (itu salah satu penyebab "respon kepotong / diam total").
+  let socketAlive = true;
+  const safeSend = async (payload) => {
+    if (!socketAlive) return false;
+    try {
+      await sock.sendMessage(jid, payload, payload.edit ? undefined : { quoted: message });
+      return true;
+    } catch (e) {
+      const msg = String(e?.message || e);
+      if (/connection closed|not connected|timed out|stream errored/i.test(msg)) socketAlive = false;
+      log?.("ai_send_error", { jid, error: msg });
+      return false;
+    }
+  };
+
   try {
     await sock.sendPresenceUpdate("composing", jid).catch(() => {});
     const base = hasImage ? "🖼️ Axyai sedang melihat gambar" : "🧠 Axyai sedang berpikir";
-    placeholder = await sock.sendMessage(jid, { text: `${base}...` }, { quoted: message });
+    placeholder = await sock.sendMessage(jid, { text: `${base}...` }, { quoted: message }).catch((e) => {
+      log?.("ai_placeholder_error", { jid, error: e?.message });
+      return null;
+    });
     timer = setInterval(() => {
-      if (!placeholder?.key || visibleStarted) return;
+      if (!placeholder?.key || visibleStarted || !socketAlive) return;
       frame = (frame + 1) % 3;
-      void sock.sendMessage(jid, { text: `${base}${".".repeat(frame + 1)}`, edit: placeholder.key }).catch(() => {});
+      void sock.sendMessage(jid, { text: `${base}${".".repeat(frame + 1)}`, edit: placeholder.key }).catch((e) => {
+        const msg = String(e?.message || e);
+        if (/connection closed|not connected|timed out|stream errored/i.test(msg)) socketAlive = false;
+      });
     }, THINK_ANIMATION_MS); timer.unref?.();
 
     const render = async (text, force = false) => {
@@ -365,25 +410,15 @@ export default async function axyaiPlugin({ sock, message, media, log }) {
       if (!force && Date.now() - lastEditAt < STREAM_EDIT_MS) return true;
       lastEditAt = Date.now(); lastRendered = clean;
       if (placeholder?.key) {
-        try {
-          await sock.sendMessage(jid, { text: clean, edit: placeholder.key });
-          return true;
-        } catch (e) {
-          log?.("ai_stream_edit_error", { jid, error: e.message });
-        }
+        const ok = await safeSend({ text: clean, edit: placeholder.key });
+        if (ok) return true;
       }
-      try {
-        await sock.sendMessage(jid, { text: clean }, { quoted: message });
-        return true;
-      } catch (e) {
-        log?.("ai_send_fallback_error", { jid, error: e.message });
-        return false;
-      }
+      return safeSend({ text: clean });
     };
 
-    const answer = await askAxyaiStream({ messages, mode, log, jid, sessionId: session.id, onVisibleText: v => void render(v), onThinking: () => {} });
+    const answer = await askAxyaiStream({ messages, mode, log, jid, sessionId: session.id, hasImage, onVisibleText: v => void render(v), onThinking: () => {} });
     const rendered = await render(answer, true);
-    if (!rendered) throw new Error("Jawaban Axyai diterima, tetapi gagal dikirim ke WhatsApp.");
+    if (!rendered) throw new Error("Jawaban Axyai diterima, tetapi gagal dikirim ke WhatsApp (koneksi mungkin terputus).");
 
     session.messages = trimMessages([...(session.messages || []), { role: "user", content: Array.isArray(userContent) ? `[Gambar] ${prompt}` : prompt }, { role: "assistant", content: answer }]);
     session.mode = mode; session.updatedAt = Date.now(); session.chatJids = [...new Set([...(session.chatJids || []), jid, info.identity].filter(Boolean))]; saveStore();
@@ -395,11 +430,14 @@ export default async function axyaiPlugin({ sock, message, media, log }) {
     let friendly = "Axyai sedang bermasalah, coba lagi sebentar.";
     if (e?.code === "AXYAI_GATEWAY_HTML") friendly = `Axyai gateway sedang bermasalah (HTTP ${e.status || "?"}). Coba lagi sebentar.`;
     else if (e?.status === 403 || err.includes("403")) friendly = "Axyai API menolak request (403). Cek konfigurasi API/Cloudflare.";
+    else if (!AXYAI_API_KEY) friendly = "Bot belum dikonfigurasi dengan benar (API key kosong). Hubungi admin.";
+    else if (/timed out|abort/i.test(err)) friendly = hasImage ? "Analisis gambar terlalu lama, coba kirim ulang atau gambar lebih kecil." : "Axyai terlalu lama merespons, coba lagi.";
+
     let sent = false;
-    if (placeholder?.key) {
-      try { await sock.sendMessage(jid, { text: friendly, edit: placeholder.key }); sent = true; } catch {}
+    if (placeholder?.key && socketAlive) {
+      sent = await safeSend({ text: friendly, edit: placeholder.key });
     }
-    if (!sent) await sock.sendMessage(jid, { text: friendly }, { quoted: message }).catch(() => {});
+    if (!sent && socketAlive) await safeSend({ text: friendly });
   } finally {
     stopAnim(); await sock.sendPresenceUpdate("paused", jid).catch(() => {});
   }
