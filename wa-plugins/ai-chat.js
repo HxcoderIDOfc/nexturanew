@@ -253,8 +253,8 @@ async function parseNonStreamResponse(r, { log, jid, sessionId, model }) {
 }
 
 async function askAxynityStream({ messages, log, jid, sessionId, hasImage, onVisibleText, onThinking }) {
-  const baseUrl = String(process.env.AXYNITY_BASE_URL || "http://170.39.194.189:4123").replace(/\/+$/, "");
-  const model = String(process.env.AXYNITY_MODEL || "Axynity-Flash").trim() || "Axynity-Flash";
+  const baseUrl = String(process.env.AXYNITY_BASE_URL || process.env.NERA_AI_BASE_URL || "http://170.39.194.189:4123").replace(/\/+$/, "");
+  const model = String(process.env.AXYNITY_MODEL || process.env.NERA_AI_MODEL || "axynity").trim() || "axynity";
 
   if (!AXYNITY_API_KEY) {
     throw new Error("AXYNITY_API_KEY belum di-set di environment.");
