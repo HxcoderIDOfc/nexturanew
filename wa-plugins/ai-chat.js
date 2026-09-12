@@ -13,23 +13,23 @@ function getText(m) {
 }
 
 const VALID_MODES = new Set(["cepat", "pintar"]);
-const DEFAULT_MODE = String(process.env.AXYAI_DEFAULT_MODE || "cepat").toLowerCase() === "pintar" ? "pintar" : "cepat";
-const MAX_TURNS = Math.max(2, Number(process.env.AXYAI_MEMORY_TURNS || 20));
-const STREAM_EDIT_MS = Math.max(700, Number(process.env.AXYAI_STREAM_EDIT_MS || 1200));
-const THINK_ANIMATION_MS = Math.max(700, Number(process.env.AXYAI_THINK_ANIMATION_MS || 900));
-const MAX_IMAGE_BYTES = Math.max(256000, Number(process.env.AXYAI_MAX_IMAGE_BYTES || 8 * 1024 * 1024));
+const DEFAULT_MODE = String(process.env.AXYNITY_DEFAULT_MODE || "cepat").toLowerCase() === "pintar" ? "pintar" : "cepat";
+const MAX_TURNS = Math.max(2, Number(process.env.AXYNITY_MEMORY_TURNS || 20));
+const STREAM_EDIT_MS = Math.max(700, Number(process.env.AXYNITY_STREAM_EDIT_MS || 1200));
+const THINK_ANIMATION_MS = Math.max(700, Number(process.env.AXYNITY_THINK_ANIMATION_MS || 900));
+const MAX_IMAGE_BYTES = Math.max(256000, Number(process.env.AXYNITY_MAX_IMAGE_BYTES || 8 * 1024 * 1024));
 const SESSION_DIR = path.resolve(process.env.WA_SESSION_DIR || "/tmp/axynera-wa-session");
-const MEMORY_FILE = path.resolve(process.env.AXYAI_MEMORY_FILE || path.join(SESSION_DIR, "axyai-memory.json"));
+const MEMORY_FILE = path.resolve(process.env.AXYNITY_MEMORY_FILE || path.join(SESSION_DIR, "axynity-memory.json"));
 
 // Timeout dipisah: request dengan gambar butuh waktu lebih lama di upstream vision model.
-const TEXT_TIMEOUT_MS = Number(process.env.AXYAI_TIMEOUT_MS || 120000);
-const IMAGE_TIMEOUT_MS = Number(process.env.AXYAI_IMAGE_TIMEOUT_MS || 180000);
+const TEXT_TIMEOUT_MS = Number(process.env.AXYNITY_TIMEOUT_MS || 120000);
+const IMAGE_TIMEOUT_MS = Number(process.env.AXYNITY_IMAGE_TIMEOUT_MS || 180000);
 
 // PENTING: API key WAJIB di-set lewat environment variable, tidak ada fallback hardcoded.
-// Set di .env / process manager kamu: AXYAI_API_KEY=xxxx
-const AXYAI_API_KEY = String(process.env.AXYAI_API_KEY || "").trim();
-if (!AXYAI_API_KEY) {
-  console.error("[axyai-plugin] FATAL: AXYAI_API_KEY belum di-set di environment. Plugin tidak akan bisa memanggil Axyai API.");
+// Set di .env / process manager kamu: AXYNITY_API_KEY=xxxx
+const AXYNITY_API_KEY = String(process.env.AXYNITY_API_KEY || "").trim();
+if (!AXYNITY_API_KEY) {
+  console.error("[axynity-plugin] FATAL: AXYNITY_API_KEY belum di-set di environment. Plugin tidak akan bisa memanggil Axynity API.");
 }
 
 function emptyStore() { return { version: 1, aliases: {}, sessions: {} }; }
@@ -40,7 +40,7 @@ function loadStore() {
     const x = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8"));
     return { version: 1, aliases: x?.aliases || {}, sessions: x?.sessions || {} };
   } catch (e) {
-    console.error("[axyai-memory] gagal membaca:", e.message);
+    console.error("[axynity-memory] gagal membaca:", e.message);
     return emptyStore();
   }
 }
@@ -51,7 +51,7 @@ function saveStore() {
     const tmp = `${MEMORY_FILE}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(store, null, 2), "utf8");
     fs.renameSync(tmp, MEMORY_FILE);
-  } catch (e) { console.error("[axyai-memory] gagal menyimpan:", e.message); }
+  } catch (e) { console.error("[axynity-memory] gagal menyimpan:", e.message); }
 }
 
 const norm = (v = "") => String(v || "").trim().toLowerCase();
@@ -188,7 +188,7 @@ async function downloadWhatsAppImage(message, media) {
         return buffer.toString("base64");
       }
     } catch (err) {
-      console.error("[axyai-media] Gagal mengunduh gambar:", err.message);
+      console.error("[axynity-media] Gagal mengunduh gambar:", err.message);
       throw new Error(`Gagal mengunduh gambar dari WhatsApp: ${err.message}`);
     }
   }
@@ -213,7 +213,7 @@ function headers(apiKey, stream) {
   const h = {
     "Content-Type": "application/json",
     Accept: stream ? "text/event-stream" : "application/json",
-    "User-Agent": "Axynera-WA-Bot/1.0"
+    "User-Agent": "Axynity-WA-Bot/1.0"
   };
   if (apiKey) h.Authorization = `Bearer ${apiKey}`;
   return h;
@@ -224,16 +224,16 @@ function isHtml(body = "", contentType = "") {
 }
 function safeHttpError(status, body, contentType) {
   if (isHtml(body, contentType)) {
-    const e = new Error(`Axyai gateway sedang bermasalah (HTTP ${status}).`); e.code = "AXYAI_GATEWAY_HTML"; e.status = status; return e;
+    const e = new Error(`Axynity gateway sedang bermasalah (HTTP ${status}).`); e.code = "AXYNITY_GATEWAY_HTML"; e.status = status; return e;
   }
   try {
     const d = JSON.parse(body || "{}");
     const msg = d?.error?.message || d?.message;
     if (msg) { const e = new Error(String(msg)); e.status = status; return e; }
   } catch {}
-  const e = new Error(`Axyai API HTTP ${status}.`); e.status = status; return e;
+  const e = new Error(`Axynity API HTTP ${status}.`); e.status = status; return e;
 }
-async function doAxyaiRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, stream = true, includeModel = true }) {
+async function doAxynityRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, stream = true, includeModel = true }) {
   const payload = { mode, stream, messages };
   if (includeModel && model) payload.model = model;
   return fetch(`${baseUrl}/v1/chat/completions`, {
@@ -256,29 +256,29 @@ async function parseNonStreamResponse(r, { log, jid, sessionId, model, mode }) {
   }
   let data;
   try { data = JSON.parse(body); }
-  catch { throw new Error("Axyai non-stream mengirim JSON tidak valid."); }
+  catch { throw new Error("Axynity non-stream mengirim JSON tidak valid."); }
   const answer = stripHiddenReasoning(data?.choices?.[0]?.message?.content || data?.message?.content || data?.text || "");
-  if (!answer) throw new Error("Axyai non-stream tidak mengirim jawaban.");
+  if (!answer) throw new Error("Axynity non-stream tidak mengirim jawaban.");
   log?.("ai_response", { jid, sessionId, model, mode, stream: false, text: answer });
   return answer;
 }
 
-async function askAxyaiStream({ messages, mode, log, jid, sessionId, hasImage, onVisibleText, onThinking }) {
-  const baseUrl = String(process.env.AXYAI_BASE_URL || "https://openai-gonka.akuanakkampoeng.workers.dev").replace(/\/+$/, "");
-  const model = String(process.env.AXYAI_MODEL || "Axyai-Flash").trim() || "Axyai-Flash";
+async function askAxynityStream({ messages, mode, log, jid, sessionId, hasImage, onVisibleText, onThinking }) {
+  const baseUrl = String(process.env.AXYNITY_BASE_URL || "https://openai-gonka.akuanakkampoeng.workers.dev").replace(/\/+$/, "");
+  const model = String(process.env.AXYNITY_MODEL || "Axynity-Flash").trim() || "Axynity-Flash";
 
-  if (!AXYAI_API_KEY) {
-    throw new Error("AXYAI_API_KEY belum di-set di environment. Set env var ini lalu restart bot.");
+  if (!AXYNITY_API_KEY) {
+    throw new Error("AXYNITY_API_KEY belum di-set di environment. Set env var ini lalu restart bot.");
   }
 
   const timeoutMs = hasImage ? IMAGE_TIMEOUT_MS : TEXT_TIMEOUT_MS;
   log?.("ai_request", { jid, sessionId, model, mode, stream: true, hasImage, timeoutMs, historyMessages: Math.max(0, messages.length - 1) });
 
-  let r = await doAxyaiRequest({ baseUrl, model, mode, messages, apiKey: AXYAI_API_KEY, timeoutMs, stream: true, includeModel: true });
+  let r = await doAxynityRequest({ baseUrl, model, mode, messages, apiKey: AXYNITY_API_KEY, timeoutMs, stream: true, includeModel: true });
   if (r.status === 403) {
     const b = await r.text().catch(() => "");
     log?.("ai_403", { jid, sessionId, withModel: true, contentType: r.headers.get("content-type") || "", body: b.slice(0, 1200) });
-    r = await doAxyaiRequest({ baseUrl, model, mode, messages, apiKey: AXYAI_API_KEY, timeoutMs, stream: true, includeModel: false });
+    r = await doAxynityRequest({ baseUrl, model, mode, messages, apiKey: AXYNITY_API_KEY, timeoutMs, stream: true, includeModel: false });
   }
 
   if (!r.ok || (r.headers.get("content-type") || "").toLowerCase().includes("text/html")) {
@@ -286,18 +286,18 @@ async function askAxyaiStream({ messages, mode, log, jid, sessionId, hasImage, o
     const ct = r.headers.get("content-type") || "";
     log?.("ai_stream_fallback", { jid, sessionId, status: r.status, contentType: ct, html: isHtml(b, ct), body: b.slice(0, 1600) });
 
-    let fallback = await doAxyaiRequest({ baseUrl, model, mode, messages, apiKey: AXYAI_API_KEY, timeoutMs, stream: false, includeModel: true });
+    let fallback = await doAxynityRequest({ baseUrl, model, mode, messages, apiKey: AXYNITY_API_KEY, timeoutMs, stream: false, includeModel: true });
     if (fallback.status === 403) {
       const fb = await fallback.text().catch(() => "");
       log?.("ai_nonstream_403", { jid, sessionId, withModel: true, body: fb.slice(0, 1200) });
-      fallback = await doAxyaiRequest({ baseUrl, model, mode, messages, apiKey: AXYAI_API_KEY, timeoutMs, stream: false, includeModel: false });
+      fallback = await doAxynityRequest({ baseUrl, model, mode, messages, apiKey: AXYNITY_API_KEY, timeoutMs, stream: false, includeModel: false });
     }
     const answer = await parseNonStreamResponse(fallback, { log, jid, sessionId, model, mode });
     onVisibleText?.(answer);
     return answer;
   }
 
-  if (!r.body) throw new Error("Axyai SSE tidak mengirim response body.");
+  if (!r.body) throw new Error("Axynity SSE tidak mengirim response body.");
   const reader = r.body.getReader(); const decoder = new TextDecoder();
   let buffer = "", raw = "";
   while (true) {
@@ -316,7 +316,7 @@ async function askAxyaiStream({ messages, mode, log, jid, sessionId, hasImage, o
     }
   }
   const answer = stripHiddenReasoning(raw);
-  if (!answer) throw new Error("Axyai tidak mengirim balasan yang bisa ditampilkan.");
+  if (!answer) throw new Error("Axynity tidak mengirim balasan yang bisa ditampilkan.");
   log?.("ai_response", { jid, sessionId, model, mode, stream: true, text: answer });
   return answer;
 }
@@ -325,7 +325,7 @@ export async function onLidMapping({ mapping, log }) { migrateAlias(mapping?.pn,
 export async function onChatDelete({ jid, log }) { resetSessionsForChat(jid, log); }
 export async function onMessagesDelete({ event, log }) { if (event?.jid && event?.all === true) resetSessionsForChat(event.jid, log); }
 
-export default async function axyaiPlugin({ sock, message, media, log }) {
+export default async function axynityPlugin({ sock, message, media, log }) {
   const jid = message?.key?.remoteJid;
   if (!jid || message?.key?.fromMe || jid === "status@broadcast") return;
   const raw = String(getText(message)).trim();
@@ -337,23 +337,22 @@ export default async function axyaiPlugin({ sock, message, media, log }) {
   if (!raw && !hasImage) return;
 
   const lower = raw.toLowerCase(); const info = getIdentity(message); const session = getSession(info);
-  const modeMatch = raw.match(/^\.?(?:mode|axyai\s+mode)(?:\s+(cepat|pintar))?\s*$/i);
+  const modeMatch = raw.match(/^\.?(?:mode|axynity\s+mode)(?:\s+(cepat|pintar))?\s*$/i);
   if (modeMatch && !hasImage) {
     const requested = String(modeMatch[1] || "").toLowerCase();
-    if (!requested) { await sock.sendMessage(jid, { text: `⚙️ *Mode Axyai saat ini: ${session.mode || DEFAULT_MODE}*\n\n• *.mode cepat* — respons cepat\n• *.mode pintar* — penalaran lebih dalam` }, { quoted: message }); return; }
+    if (!requested) { await sock.sendMessage(jid, { text: `⚙️ *Mode Axynity saat ini: ${session.mode || DEFAULT_MODE}*\n\n• *.mode cepat* — respons cepat\n• *.mode pintar* — penalaran lebih dalam` }, { quoted: message }); return; }
     setChatMode(info, requested);
-    await sock.sendMessage(jid, { text: requested === "pintar" ? "🧠 Mode Axyai diubah ke *pintar*." : "⚡ Mode Axyai diubah ke *cepat*." }, { quoted: message }); return;
+    await sock.sendMessage(jid, { text: requested === "pintar" ? "🧠 Mode Axynity diubah ke *pintar*." : "⚡ Mode Axynity diubah ke *cepat*." }, { quoted: message }); return;
   }
   if (!hasImage && /^\.(?:new|reset|newchat|lupain)\s*$/i.test(raw)) {
     delete store.sessions[info.key]; store.sessions[info.key] = newSession(info, session.mode || DEFAULT_MODE); saveStore();
-    await sock.sendMessage(jid, { text: "🆕 Sesi Axyai baru dibuat." }, { quoted: message }); return;
+    await sock.sendMessage(jid, { text: "🆕 Sesi Axynity baru dibuat." }, { quoted: message }); return;
   }
 
   const cmd = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
   const autoReply = String(process.env.WA_AI_AUTO_REPLY || "true").toLowerCase() !== "false";
 
   // Gambar tanpa caption & tanpa command hanya diproses jika auto-reply aktif ATAU ada caption/command eksplisit.
-  // Ini mencegah bot ikut "nyaut" gambar yang dikirim orang lain di grup tanpa diminta saat auto-reply off.
   if (!hasImage && !cmd && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
   if (hasImage && !cmd && !raw && !autoReply) return;
 
@@ -372,8 +371,6 @@ export default async function axyaiPlugin({ sock, message, media, log }) {
   let placeholder = null, lastEditAt = 0, lastRendered = "", visibleStarted = false, frame = 0, timer = null;
   const stopAnim = () => { if (timer) clearInterval(timer); timer = null; };
 
-  // Helper: kirim/edit pesan dengan aman, tandai kalau socket sudah putus supaya kita tidak
-  // terus mencoba mengirim ke koneksi yang mati (itu salah satu penyebab "respon kepotong / diam total").
   let socketAlive = true;
   const safeSend = async (payload) => {
     if (!socketAlive) return false;
@@ -390,7 +387,7 @@ export default async function axyaiPlugin({ sock, message, media, log }) {
 
   try {
     await sock.sendPresenceUpdate("composing", jid).catch(() => {});
-    const base = hasImage ? "🖼️ Axyai sedang melihat gambar" : "🧠 Axyai sedang berpikir";
+    const base = hasImage ? "🖼️ Axynity sedang melihat gambar" : "🧠 Axynity sedang berpikir";
     placeholder = await sock.sendMessage(jid, { text: `${base}...` }, { quoted: message }).catch((e) => {
       log?.("ai_placeholder_error", { jid, error: e?.message });
       return null;
@@ -416,9 +413,9 @@ export default async function axyaiPlugin({ sock, message, media, log }) {
       return safeSend({ text: clean });
     };
 
-    const answer = await askAxyaiStream({ messages, mode, log, jid, sessionId: session.id, hasImage, onVisibleText: v => void render(v), onThinking: () => {} });
+    const answer = await askAxynityStream({ messages, mode, log, jid, sessionId: session.id, hasImage, onVisibleText: v => void render(v), onThinking: () => {} });
     const rendered = await render(answer, true);
-    if (!rendered) throw new Error("Jawaban Axyai diterima, tetapi gagal dikirim ke WhatsApp (koneksi mungkin terputus).");
+    if (!rendered) throw new Error("Jawaban Axynity diterima, tetapi gagal dikirim ke WhatsApp (koneksi mungkin terputus).");
 
     session.messages = trimMessages([...(session.messages || []), { role: "user", content: Array.isArray(userContent) ? `[Gambar] ${prompt}` : prompt }, { role: "assistant", content: answer }]);
     session.mode = mode; session.updatedAt = Date.now(); session.chatJids = [...new Set([...(session.chatJids || []), jid, info.identity].filter(Boolean))]; saveStore();
@@ -426,12 +423,12 @@ export default async function axyaiPlugin({ sock, message, media, log }) {
     stopAnim();
     const err = e?.message || String(e);
     log?.("ai_error", { jid, identity: info.identity, sessionId: session.id, mode, status: e?.status || null, code: e?.code || null, error: err, text: prompt, hasImage });
-    console.error("[axyai-plugin]", err);
-    let friendly = "Axyai sedang bermasalah, coba lagi sebentar.";
-    if (e?.code === "AXYAI_GATEWAY_HTML") friendly = `Axyai gateway sedang bermasalah (HTTP ${e.status || "?"}). Coba lagi sebentar.`;
-    else if (e?.status === 403 || err.includes("403")) friendly = "Axyai API menolak request (403). Cek konfigurasi API/Cloudflare.";
-    else if (!AXYAI_API_KEY) friendly = "Bot belum dikonfigurasi dengan benar (API key kosong). Hubungi admin.";
-    else if (/timed out|abort/i.test(err)) friendly = hasImage ? "Analisis gambar terlalu lama, coba kirim ulang atau gambar lebih kecil." : "Axyai terlalu lama merespons, coba lagi.";
+    console.error("[axynity-plugin]", err);
+    let friendly = "Axynity sedang bermasalah, coba lagi sebentar.";
+    if (e?.code === "AXYNITY_GATEWAY_HTML") friendly = `Axynity gateway sedang bermasalah (HTTP ${e.status || "?"}). Coba lagi sebentar.`;
+    else if (e?.status === 403 || err.includes("403")) friendly = "Axynity API menolak request (403). Cek konfigurasi API/Cloudflare.";
+    else if (!AXYNITY_API_KEY) friendly = "Bot belum dikonfigurasi dengan benar (API key kosong). Hubungi admin.";
+    else if (/timed out|abort/i.test(err)) friendly = hasImage ? "Analisis gambar terlalu lama, coba kirim ulang atau gambar lebih kecil." : "Axynity terlalu lama merespons, coba lagi.";
 
     let sent = false;
     if (placeholder?.key && socketAlive) {
