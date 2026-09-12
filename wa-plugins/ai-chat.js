@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 
 function getText(m) {
   return (
@@ -130,6 +131,38 @@ function stripHiddenReasoning(v = "") {
   t = t.replace(/<(?:minimax:)?(?:think|reasoning|analysis)\b[^>]*>[\s\S]*?(?:<\/(?:minimax:)?(?:think|reasoning|analysis)>|$)/gi, "");
   t = t.replace(/<\/?(?:minimax:)?(?:think|reasoning|analysis)\b[^>]*>/gi, "");
   return t.trim();
+}
+
+async function convertImageToWebp(buffer) {
+  try {
+    const sharp = (await import("sharp")).default;
+    return await sharp(buffer)
+      .resize(512, 512, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .webp({ quality: 80 })
+      .toBuffer();
+  } catch {
+    try {
+      return await new Promise((resolve, reject) => {
+        const ff = spawn("ffmpeg", [
+          "-i", "pipe:0",
+          "-vf", "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
+          "-f", "webp",
+          "pipe:1"
+        ]);
+        const chunks = [];
+        ff.stdout.on("data", (chunk) => chunks.push(chunk));
+        ff.on("close", (code) => {
+          if (code === 0 && chunks.length) resolve(Buffer.concat(chunks));
+          else reject(new Error("FFmpeg error"));
+        });
+        ff.on("error", reject);
+        ff.stdin.write(buffer);
+        ff.stdin.end();
+      });
+    } catch {
+      return buffer;
+    }
+  }
 }
 
 async function downloadWhatsAppMedia(targetMsg, mediaType = "buffer") {
@@ -324,6 +357,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   const hasImage = hasDirectImage || hasQuotedImage || media?.type === "image";
   const hasSticker = Boolean(message?.message?.stickerMessage);
 
+  // 1. FITUR KOMENTAR STIKER SPONTAN KETIKA ORANG KIRIM STIKER TIBA-TIBA
   if (hasSticker) {
     try {
       const emojis = ["😂", "🔥", "👍", "🗿", "💀", "❤️", "✨"];
@@ -334,7 +368,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
       if (stickerBuffer) {
         const b64Sticker = stickerBuffer.toString("base64");
         const stickerContent = [
-          { type: "text", text: "User mengirim stiker ini secara tiba-tiba. Berikan komentar singkat, santai, lucu, atau respons yang asyik tentang stiker ini layaknya teman ngobrol di WhatsApp." },
+          { type: "text", text: "User mengirim stiker ini secara tiba-tiba di chat. Berikan komentar santai 1 kalimat penuh antusias seperti: 'Wihh stickernya bagus/lucu banget, gambar [deskripsikan objek/karakter/hal menarik di stiker]...' Sampaikan secara alami layaknya teman di WhatsApp." },
           { type: "image_url", image_url: { url: `data:image/webp;base64,${b64Sticker}` } }
         ];
         const commentMessages = [{ role: "user", content: stickerContent }];
@@ -361,6 +395,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   const cmd = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
   const autoReply = String(process.env.WA_AI_AUTO_REPLY || "true").toLowerCase() !== "false";
 
+  // 2. FITUR UBAH GAMBAR KE STIKER + AI DETEKSI ISI GAMBAR DAN BERI PESAN TERTULIS
   const isStickerCommand = hasImage && /\b(sticker|stiker)\b/i.test(raw);
   if (isStickerCommand) {
     let placeholder = null;
@@ -385,12 +420,35 @@ export default async function axynityPlugin({ sock, message, media, log }) {
       }
 
       if (imgBuffer) {
+        const webpBuffer = await convertImageToWebp(imgBuffer);
+
+        // Hapus pesan placeholder teks agar tidak menumpuk
         if (placeholder?.key) {
-          await sock.sendMessage(jid, { sticker: imgBuffer, edit: placeholder.key });
-        } else {
-          await sock.sendMessage(jid, { sticker: imgBuffer }, { quoted: message });
+          await sock.sendMessage(jid, { delete: placeholder.key }).catch(() => {});
         }
+
+        // Kirim stiker terlebih dahulu
+        const sentSticker = await sock.sendMessage(jid, { sticker: webpBuffer }, { quoted: message });
         await sock.sendMessage(jid, { react: { text: "🔥", key: message.key } }).catch(() => {});
+
+        // AI Vision mendeteksi objek gambar lalu beri respon balasan khusus
+        const b64Image = imgBuffer.toString("base64");
+        const promptContent = [
+          { type: "text", text: "Stiker dari gambar ini baru saja berhasil dibuat. Berikan pesan santai 1 kalimat sederhana untuk memberi tahu user, contohnya: 'Stickernya udah jadi nih! Gambar [sebutkan objek/hewan/ekspresi di gambar]...' " },
+          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64Image}` } }
+        ];
+
+        const aiResponse = await askAxynityStream({
+          messages: [{ role: "user", content: promptContent }],
+          log,
+          jid,
+          sessionId: "sticker-make-comment",
+          hasImage: true
+        });
+
+        if (aiResponse) {
+          await sock.sendMessage(jid, { text: aiResponse }, { quoted: sentSticker || message });
+        }
         return;
       } else {
         throw new Error("Buffer gambar kosong atau gagal diunduh.");
