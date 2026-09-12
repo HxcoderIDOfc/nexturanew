@@ -12,8 +12,6 @@ function getText(m) {
   );
 }
 
-const VALID_MODES = new Set(["cepat", "pintar"]);
-const DEFAULT_MODE = String(process.env.AXYNITY_DEFAULT_MODE || "cepat").toLowerCase() === "pintar" ? "pintar" : "cepat";
 const MAX_TURNS = Math.max(2, Number(process.env.AXYNITY_MEMORY_TURNS || 20));
 const STREAM_EDIT_MS = Math.max(700, Number(process.env.AXYNITY_STREAM_EDIT_MS || 1200));
 const THINK_ANIMATION_MS = Math.max(700, Number(process.env.AXYNITY_THINK_ANIMATION_MS || 900));
@@ -21,15 +19,12 @@ const MAX_IMAGE_BYTES = Math.max(256000, Number(process.env.AXYNITY_MAX_IMAGE_BY
 const SESSION_DIR = path.resolve(process.env.WA_SESSION_DIR || "/tmp/axynera-wa-session");
 const MEMORY_FILE = path.resolve(process.env.AXYNITY_MEMORY_FILE || path.join(SESSION_DIR, "axynity-memory.json"));
 
-// Timeout dipisah: request dengan gambar butuh waktu lebih lama di upstream vision model.
 const TEXT_TIMEOUT_MS = Number(process.env.AXYNITY_TIMEOUT_MS || 120000);
 const IMAGE_TIMEOUT_MS = Number(process.env.AXYNITY_IMAGE_TIMEOUT_MS || 180000);
 
-// PENTING: API key WAJIB di-set lewat environment variable, tidak ada fallback hardcoded.
-// Set di .env / process manager kamu: AXYNITY_API_KEY=xxxx
 const AXYNITY_API_KEY = String(process.env.AXYNITY_API_KEY || "").trim();
 if (!AXYNITY_API_KEY) {
-  console.error("[axynity-plugin] FATAL: AXYNITY_API_KEY belum di-set di environment. Plugin tidak akan bisa memanggil Axynity API.");
+  console.error("[axynity-plugin] FATAL: AXYNITY_API_KEY belum di-set di environment.");
 }
 
 function emptyStore() { return { version: 1, aliases: {}, sessions: {} }; }
@@ -73,19 +68,15 @@ function getIdentity(message) {
   return { key: `dm:${id}`, identity: id, chatJid: remote || id, groupJid: null };
 }
 
-function newSession(info, mode = DEFAULT_MODE) {
+function newSession(info) {
   const now = Date.now();
-  return { id: randomUUID(), identity: info.identity, chatJids: [...new Set([info.chatJid, info.identity].filter(Boolean))], groupJid: info.groupJid, mode, messages: [], createdAt: now, updatedAt: now };
+  return { id: randomUUID(), identity: info.identity, chatJids: [...new Set([info.chatJid, info.identity].filter(Boolean))], groupJid: info.groupJid, messages: [], createdAt: now, updatedAt: now };
 }
 function getSession(info) {
   if (!store.sessions[info.key]) { store.sessions[info.key] = newSession(info); saveStore(); }
   return store.sessions[info.key];
 }
 const trimMessages = (m = []) => m.slice(-(MAX_TURNS * 2));
-function setChatMode(info, mode) {
-  if (!VALID_MODES.has(mode)) return false;
-  const s = getSession(info); s.mode = mode; s.updatedAt = Date.now(); saveStore(); return true;
-}
 function migrateAlias(pn, lid, log) {
   const a = norm(pn), b = norm(lid); if (!a || !b || !isLid(b)) return;
   store.aliases[a] = b; store.aliases[b] = b;
@@ -134,7 +125,6 @@ function extractSseText(payload) {
   return { type: "none", text: "" };
 }
 
-// Menghapus total tag thinking/reasoning bawaan AI (DeepSeek / MiniMax)
 function stripHiddenReasoning(v = "") {
   let t = String(v || "");
   t = t.replace(/<(?:minimax:)?(?:think|reasoning|analysis)\b[^>]*>[\s\S]*?(?:<\/(?:minimax:)?(?:think|reasoning|analysis)>|$)/gi, "");
@@ -142,7 +132,6 @@ function stripHiddenReasoning(v = "") {
   return t.trim();
 }
 
-// Fungsi Otomatis Mengunduh Gambar dari WhatsApp (Media Langsung / Quoted Reply)
 async function downloadWhatsAppImage(message, media) {
   if (media?.path && fs.existsSync(media.path)) {
     const stat = fs.statSync(media.path);
@@ -233,8 +222,8 @@ function safeHttpError(status, body, contentType) {
   } catch {}
   const e = new Error(`Axynity API HTTP ${status}.`); e.status = status; return e;
 }
-async function doAxynityRequest({ baseUrl, model, mode, messages, apiKey, timeoutMs, stream = true, includeModel = true }) {
-  const payload = { mode, stream, messages };
+async function doAxynityRequest({ baseUrl, model, messages, apiKey, timeoutMs, stream = true, includeModel = true }) {
+  const payload = { stream, messages };
   if (includeModel && model) payload.model = model;
   return fetch(`${baseUrl}/v1/chat/completions`, {
     method: "POST",
@@ -243,7 +232,7 @@ async function doAxynityRequest({ baseUrl, model, mode, messages, apiKey, timeou
     signal: AbortSignal.timeout(timeoutMs)
   });
 }
-async function parseNonStreamResponse(r, { log, jid, sessionId, model, mode }) {
+async function parseNonStreamResponse(r, { log, jid, sessionId, model }) {
   const body = await r.text().catch(() => "");
   const ct = r.headers.get("content-type") || "";
   if (!r.ok) {
@@ -259,26 +248,26 @@ async function parseNonStreamResponse(r, { log, jid, sessionId, model, mode }) {
   catch { throw new Error("Axynity non-stream mengirim JSON tidak valid."); }
   const answer = stripHiddenReasoning(data?.choices?.[0]?.message?.content || data?.message?.content || data?.text || "");
   if (!answer) throw new Error("Axynity non-stream tidak mengirim jawaban.");
-  log?.("ai_response", { jid, sessionId, model, mode, stream: false, text: answer });
+  log?.("ai_response", { jid, sessionId, model, stream: false, text: answer });
   return answer;
 }
 
-async function askAxynityStream({ messages, mode, log, jid, sessionId, hasImage, onVisibleText, onThinking }) {
-  const baseUrl = String(process.env.AXYNITY_BASE_URL || "https://openai-gonka.akuanakkampoeng.workers.dev").replace(/\/+$/, "");
+async function askAxynityStream({ messages, log, jid, sessionId, hasImage, onVisibleText, onThinking }) {
+  const baseUrl = String(process.env.AXYNITY_BASE_URL || "http://170.39.194.189:4123").replace(/\/+$/, "");
   const model = String(process.env.AXYNITY_MODEL || "Axynity-Flash").trim() || "Axynity-Flash";
 
   if (!AXYNITY_API_KEY) {
-    throw new Error("AXYNITY_API_KEY belum di-set di environment. Set env var ini lalu restart bot.");
+    throw new Error("AXYNITY_API_KEY belum di-set di environment.");
   }
 
   const timeoutMs = hasImage ? IMAGE_TIMEOUT_MS : TEXT_TIMEOUT_MS;
-  log?.("ai_request", { jid, sessionId, model, mode, stream: true, hasImage, timeoutMs, historyMessages: Math.max(0, messages.length - 1) });
+  log?.("ai_request", { jid, sessionId, model, stream: true, hasImage, timeoutMs, historyMessages: Math.max(0, messages.length - 1) });
 
-  let r = await doAxynityRequest({ baseUrl, model, mode, messages, apiKey: AXYNITY_API_KEY, timeoutMs, stream: true, includeModel: true });
+  let r = await doAxynityRequest({ baseUrl, model, messages, apiKey: AXYNITY_API_KEY, timeoutMs, stream: true, includeModel: true });
   if (r.status === 403) {
     const b = await r.text().catch(() => "");
     log?.("ai_403", { jid, sessionId, withModel: true, contentType: r.headers.get("content-type") || "", body: b.slice(0, 1200) });
-    r = await doAxynityRequest({ baseUrl, model, mode, messages, apiKey: AXYNITY_API_KEY, timeoutMs, stream: true, includeModel: false });
+    r = await doAxynityRequest({ baseUrl, model, messages, apiKey: AXYNITY_API_KEY, timeoutMs, stream: true, includeModel: false });
   }
 
   if (!r.ok || (r.headers.get("content-type") || "").toLowerCase().includes("text/html")) {
@@ -286,13 +275,13 @@ async function askAxynityStream({ messages, mode, log, jid, sessionId, hasImage,
     const ct = r.headers.get("content-type") || "";
     log?.("ai_stream_fallback", { jid, sessionId, status: r.status, contentType: ct, html: isHtml(b, ct), body: b.slice(0, 1600) });
 
-    let fallback = await doAxynityRequest({ baseUrl, model, mode, messages, apiKey: AXYNITY_API_KEY, timeoutMs, stream: false, includeModel: true });
+    let fallback = await doAxynityRequest({ baseUrl, model, messages, apiKey: AXYNITY_API_KEY, timeoutMs, stream: false, includeModel: true });
     if (fallback.status === 403) {
       const fb = await fallback.text().catch(() => "");
       log?.("ai_nonstream_403", { jid, sessionId, withModel: true, body: fb.slice(0, 1200) });
-      fallback = await doAxynityRequest({ baseUrl, model, mode, messages, apiKey: AXYNITY_API_KEY, timeoutMs, stream: false, includeModel: false });
+      fallback = await doAxynityRequest({ baseUrl, model, messages, apiKey: AXYNITY_API_KEY, timeoutMs, stream: false, includeModel: false });
     }
-    const answer = await parseNonStreamResponse(fallback, { log, jid, sessionId, model, mode });
+    const answer = await parseNonStreamResponse(fallback, { log, jid, sessionId, model });
     onVisibleText?.(answer);
     return answer;
   }
@@ -308,7 +297,6 @@ async function askAxynityStream({ messages, mode, log, jid, sessionId, hasImage,
       const block = buffer.slice(0, i); buffer = buffer.slice(i + 2);
       const { event, data } = parseSseBlock(block);
       if (!data || data === "[DONE]") continue;
-      // Sembunyikan sinyal pemikiran
       if (event === "thinking" || event === "reasoning") { onThinking?.(); continue; }
       const piece = extractSseText(data); if (!piece.text) continue;
       raw = piece.type === "full" ? piece.text : raw + piece.text;
@@ -317,7 +305,7 @@ async function askAxynityStream({ messages, mode, log, jid, sessionId, hasImage,
   }
   const answer = stripHiddenReasoning(raw);
   if (!answer) throw new Error("Axynity tidak mengirim balasan yang bisa ditampilkan.");
-  log?.("ai_response", { jid, sessionId, model, mode, stream: true, text: answer });
+  log?.("ai_response", { jid, sessionId, model, stream: true, text: answer });
   return answer;
 }
 
@@ -337,27 +325,19 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   if (!raw && !hasImage) return;
 
   const lower = raw.toLowerCase(); const info = getIdentity(message); const session = getSession(info);
-  const modeMatch = raw.match(/^\.?(?:mode|axynity\s+mode)(?:\s+(cepat|pintar))?\s*$/i);
-  if (modeMatch && !hasImage) {
-    const requested = String(modeMatch[1] || "").toLowerCase();
-    if (!requested) { await sock.sendMessage(jid, { text: `⚙️ *Mode Axynity saat ini: ${session.mode || DEFAULT_MODE}*\n\n• *.mode cepat* — respons cepat\n• *.mode pintar* — penalaran lebih dalam` }, { quoted: message }); return; }
-    setChatMode(info, requested);
-    await sock.sendMessage(jid, { text: requested === "pintar" ? "🧠 Mode Axynity diubah ke *pintar*." : "⚡ Mode Axynity diubah ke *cepat*." }, { quoted: message }); return;
-  }
+  
   if (!hasImage && /^\.(?:new|reset|newchat|lupain)\s*$/i.test(raw)) {
-    delete store.sessions[info.key]; store.sessions[info.key] = newSession(info, session.mode || DEFAULT_MODE); saveStore();
+    delete store.sessions[info.key]; store.sessions[info.key] = newSession(info); saveStore();
     await sock.sendMessage(jid, { text: "🆕 Sesi Axynity baru dibuat." }, { quoted: message }); return;
   }
 
   const cmd = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
   const autoReply = String(process.env.WA_AI_AUTO_REPLY || "true").toLowerCase() !== "false";
 
-  // Gambar tanpa caption & tanpa command hanya diproses jika auto-reply aktif ATAU ada caption/command eksplisit.
   if (!hasImage && !cmd && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
   if (hasImage && !cmd && !raw && !autoReply) return;
 
   const prompt = cmd ? cmd[1].trim() : (raw || "Jelaskan gambar ini.");
-  const mode = session.mode || DEFAULT_MODE;
 
   let userContent;
   try {
@@ -413,16 +393,16 @@ export default async function axynityPlugin({ sock, message, media, log }) {
       return safeSend({ text: clean });
     };
 
-    const answer = await askAxynityStream({ messages, mode, log, jid, sessionId: session.id, hasImage, onVisibleText: v => void render(v), onThinking: () => {} });
+    const answer = await askAxynityStream({ messages, log, jid, sessionId: session.id, hasImage, onVisibleText: v => void render(v), onThinking: () => {} });
     const rendered = await render(answer, true);
     if (!rendered) throw new Error("Jawaban Axynity diterima, tetapi gagal dikirim ke WhatsApp (koneksi mungkin terputus).");
 
     session.messages = trimMessages([...(session.messages || []), { role: "user", content: Array.isArray(userContent) ? `[Gambar] ${prompt}` : prompt }, { role: "assistant", content: answer }]);
-    session.mode = mode; session.updatedAt = Date.now(); session.chatJids = [...new Set([...(session.chatJids || []), jid, info.identity].filter(Boolean))]; saveStore();
+    session.updatedAt = Date.now(); session.chatJids = [...new Set([...(session.chatJids || []), jid, info.identity].filter(Boolean))]; saveStore();
   } catch (e) {
     stopAnim();
     const err = e?.message || String(e);
-    log?.("ai_error", { jid, identity: info.identity, sessionId: session.id, mode, status: e?.status || null, code: e?.code || null, error: err, text: prompt, hasImage });
+    log?.("ai_error", { jid, identity: info.identity, sessionId: session.id, status: e?.status || null, code: e?.code || null, error: err, text: prompt, hasImage });
     console.error("[axynity-plugin]", err);
     let friendly = "Axynity sedang bermasalah, coba lagi sebentar.";
     if (e?.code === "AXYNITY_GATEWAY_HTML") friendly = `Axynity gateway sedang bermasalah (HTTP ${e.status || "?"}). Coba lagi sebentar.`;
