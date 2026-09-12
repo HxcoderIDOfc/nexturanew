@@ -388,12 +388,24 @@ export default async function axynityPlugin({ sock, message, media, log }) {
     }
   }
 
-  // 1. FITUR KOMENTAR STIKER SPONTAN (Santai & Asyik)
+  // 1. FITUR KOMENTAR STIKER SPONTAN (DENGAN PLACEHOLDER ANIMASI & EDIT TEKS)
   if (hasSticker) {
+    let placeholder = null, frame = 0, timer = null;
+    const stopAnim = () => { if (timer) clearInterval(timer); timer = null; };
+
     try {
       const emojis = ["😂", "🔥", "👍", "🗿", "💀", "✨"];
       const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
       await sock.sendMessage(jid, { react: { text: randomEmoji, key: message.key } }).catch(() => {});
+
+      placeholder = await sock.sendMessage(jid, { text: "🖼️ Axynity mendeteksi stiker..." }, { quoted: message }).catch(() => null);
+
+      timer = setInterval(() => {
+        if (!placeholder?.key) return;
+        frame = (frame + 1) % 3;
+        void sock.sendMessage(jid, { text: `🖼️ Axynity mendeteksi stiker${".".repeat(frame + 1)}`, edit: placeholder.key }).catch(() => {});
+      }, THINK_ANIMATION_MS);
+      timer.unref?.();
 
       const stickerBuffer = await downloadWhatsAppMedia(message, "buffer");
       if (stickerBuffer) {
@@ -404,12 +416,26 @@ export default async function axynityPlugin({ sock, message, media, log }) {
         ];
         const commentMessages = [{ role: "user", content: stickerContent }];
         const comment = await askAxynityStream({ messages: commentMessages, log, jid, sessionId: "sticker-comment", hasImage: true });
-        if (comment) {
+
+        stopAnim();
+
+        if (comment && placeholder?.key) {
+          await sock.sendMessage(jid, { text: comment, edit: placeholder.key }).catch(() => {});
+        } else if (comment) {
           await sock.sendMessage(jid, { text: comment }, { quoted: message });
+        }
+      } else {
+        stopAnim();
+        if (placeholder?.key) {
+          await sock.sendMessage(jid, { text: "Gagal membaca stikernya nih 😅", edit: placeholder.key }).catch(() => {});
         }
       }
     } catch (e) {
+      stopAnim();
       log?.("sticker_comment_error", { error: e.message });
+      if (placeholder?.key) {
+        await sock.sendMessage(jid, { text: "Gagal mendeteksi stikernya nih 😅", edit: placeholder.key }).catch(() => {});
+      }
     }
     return;
   }
@@ -497,9 +523,21 @@ export default async function axynityPlugin({ sock, message, media, log }) {
     }
   }
 
-  // 3. JIKA USER KIRIM GAMBAR TANPA CAPTION (TANYA SANTAI)
+  // 3. JIKA USER KIRIM GAMBAR TANPA CAPTION (DENGAN PLACEHOLDER ANIMASI & EDIT TEKS)
   if (hasImage && !isExplicitStickerCommand) {
+    let placeholder = null, frame = 0, timer = null;
+    const stopAnim = () => { if (timer) clearInterval(timer); timer = null; };
+
     try {
+      placeholder = await sock.sendMessage(jid, { text: "🖼️ Axynity mendeteksi gambar..." }, { quoted: message }).catch(() => null);
+
+      timer = setInterval(() => {
+        if (!placeholder?.key) return;
+        frame = (frame + 1) % 3;
+        void sock.sendMessage(jid, { text: `🖼️ Axynity mendeteksi gambar${".".repeat(frame + 1)}`, edit: placeholder.key }).catch(() => {});
+      }, THINK_ANIMATION_MS);
+      timer.unref?.();
+
       let targetMsg = message;
       if (hasQuotedImage) {
         const ctx = message.message.extendedTextMessage.contextInfo;
@@ -537,14 +575,29 @@ export default async function axynityPlugin({ sock, message, media, log }) {
           hasImage: true
         });
 
+        stopAnim();
+
         const objectText = detectedObject ? detectedObject.trim() : "ini";
         const questionText = `Wih gambar ${objectText} nih! Mau aku jadiin stiker WhatsApp sekalian nggak? Kalo mau, tinggal bales 'iya' atau 'boleh' ya! 🎨👍`;
 
-        await sock.sendMessage(jid, { text: questionText }, { quoted: message });
+        if (placeholder?.key) {
+          await sock.sendMessage(jid, { text: questionText, edit: placeholder.key }).catch(() => {});
+        } else {
+          await sock.sendMessage(jid, { text: questionText }, { quoted: message });
+        }
         return;
+      } else {
+        stopAnim();
+        if (placeholder?.key) {
+          await sock.sendMessage(jid, { text: "Gagal membaca gambarnya nih 😅", edit: placeholder.key }).catch(() => {});
+        }
       }
     } catch (e) {
+      stopAnim();
       log?.("image_detect_error", { error: e.message });
+      if (placeholder?.key) {
+        await sock.sendMessage(jid, { text: "Gagal mendeteksi gambarnya nih 😅", edit: placeholder.key }).catch(() => {});
+      }
     }
   }
 
