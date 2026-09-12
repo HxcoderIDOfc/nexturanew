@@ -28,10 +28,10 @@ if (!AXYNITY_API_KEY) {
   console.error("[axynity-plugin] FATAL: AXYNITY_API_KEY belum di-set di environment.");
 }
 
-// System Prompt Utama untuk membuat gaya balasan ramah, panjang, kaya emoji, dan alami
+// System Prompt: Santai, asyik, panjang sedang, tanpa emoji love/lebay
 const SYSTEM_PROMPT = {
   role: "system",
-  content: "Kamu adalah Axynity, sahabat AI WhatsApp yang sangat ramah, ceria, hangat, dan seru diajak ngobrol! Selalu berikan jawaban yang lengkap, detail, dan panjang agar informasi yang kamu sampaikan benar-benar jelas dan bermanfaat (jangan pernah memberikan jawaban yang singkat, kaku, atau cuek). Gunakan bahasa Indonesia sehari-hari yang luwes, alami, dan akrab layaknya manusia sungguhan yang sedang mengobrol dengan teman dekat. Selalu sisipkan berbagai emoji menarik dan ekspresif (seperti 😊, ✨, 💖, 🚀, 😂, 🤭, 🔥, dll.) di dalam setiap balasanmu agar suasana obrolan menjadi semakin hidup dan menyenangkan!"
+  content: "Kamu adalah Axynity, AI WhatsApp yang asyik, santai, dan friendly! Berikan jawaban yang jelas, informatif, dengan panjang yang sedang (pas, tidak terlalu panjang bertele-tele dan tidak terlalu singkat). Gunakan bahasa santai sehari-hari seperti teman ngobrol di WhatsApp. Gunakan emoji yang pas dan santai (seperti 👍, 🔥, 😂, ✨, 😎, 🗿), hindari emoji romantis atau berlebihan (seperti 💖, 😘, ❤️, 🥺). Tetap responsif, asyik, dan seru!"
 };
 
 function emptyStore() { return { version: 1, aliases: {}, sessions: {} }; }
@@ -226,7 +226,7 @@ async function downloadWhatsAppImage(message, media) {
 }
 
 async function buildUserContent(prompt, message, media) {
-  const text = String(prompt || "").trim() || "Tolong jelaskan gambar ini dengan rinci ya! 😊";
+  const text = String(prompt || "").trim() || "Jelaskan gambar ini singkat dan jelas ya.";
   const b64Image = await downloadWhatsAppImage(message, media);
 
   if (!b64Image) return text;
@@ -263,7 +263,6 @@ function safeHttpError(status, body, contentType) {
   const e = new Error(`Axynity API HTTP ${status}.`); e.status = status; return e;
 }
 async function doAxynityRequest({ baseUrl, model, messages, apiKey, timeoutMs, stream = true, includeModel = true }) {
-  // Pastikan System Prompt selalu ada di urutan pertama array messages
   const payloadMessages = messages[0]?.role === "system" ? messages : [SYSTEM_PROMPT, ...messages];
   const payload = { stream, messages: payloadMessages };
   if (includeModel && model) payload.model = model;
@@ -369,10 +368,10 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   const info = getIdentity(message);
   const session = getSession(info);
 
-  // 1. FITUR KOMENTAR STIKER SPONTAN KETIKA ORANG KIRIM STIKER TIBA-TIBA
+  // 1. FITUR KOMENTAR STIKER SPONTAN (Santai & Asyik)
   if (hasSticker) {
     try {
-      const emojis = ["😂", "🔥", "👍", "🗿", "💀", "❤️", "✨"];
+      const emojis = ["😂", "🔥", "👍", "🗿", "💀", "✨"];
       const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
       await sock.sendMessage(jid, { react: { text: randomEmoji, key: message.key } }).catch(() => {});
 
@@ -380,7 +379,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
       if (stickerBuffer) {
         const b64Sticker = stickerBuffer.toString("base64");
         const stickerContent = [
-          { type: "text", text: "User baru saja mengirim stiker ini secara tiba-tiba di room chat. Berikan komentar santai, ramah, dan seru tentang stiker ini (1-2 kalimat lengkap dengan emoji lucu seperti: 'Wihh stickernya bagus banget! Gambar [deskripsikan objek/karakter di stiker]... ✨'). Sampaikan secara alami dan hangat layaknya teman ngobrol yang asyik di WhatsApp!" },
+          { type: "text", text: "User mengirim stiker ini di chat. Berikan komentar singkat dan santai (1 kalimat singkat seperti: 'Mantap stickernya, gambar [objek]... 😎'). Sampaikan dengan santai layaknya teman." },
           { type: "image_url", image_url: { url: `data:image/webp;base64,${b64Sticker}` } }
         ];
         const commentMessages = [{ role: "user", content: stickerContent }];
@@ -395,7 +394,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
     return;
   }
 
-  // 2. DETEKSI BUAT STIKER (Explicit command ATAU konfirmasi penawaran "iya")
+  // 2. DETEKSI BUAT STIKER
   const isExplicitStickerCommand = (hasImage && /\b(sticker|stiker)\b/i.test(raw)) || (hasQuotedImage && /\b(sticker|stiker)\b/i.test(raw));
   const isConfirmPattern = /^(?:iya|ya|boleh|mau|ok|yep|gas|bikin|jadikan|silahkan|acc|pikirin|stiker|sticker)\b/i.test(lower) || /\b(jadikan stiker|bikin stiker|buat stiker)\b/i.test(lower);
   const hasPendingSticker = Boolean(session?.awaitingStickerConfirm && session?.pendingImageB64);
@@ -405,12 +404,12 @@ export default async function axynityPlugin({ sock, message, media, log }) {
     const stopAnim = () => { if (timer) clearInterval(timer); timer = null; };
 
     try {
-      placeholder = await sock.sendMessage(jid, { text: "⏳ Sedang membuat stiker lucu buat kamu..." }, { quoted: message }).catch(() => null);
+      placeholder = await sock.sendMessage(jid, { text: "⏳ Sedang membuat stiker..." }, { quoted: message }).catch(() => null);
 
       timer = setInterval(() => {
         if (!placeholder?.key) return;
         frame = (frame + 1) % 3;
-        void sock.sendMessage(jid, { text: `⏳ Sedang membuat stiker lucu buat kamu${".".repeat(frame + 1)}`, edit: placeholder.key }).catch(() => {});
+        void sock.sendMessage(jid, { text: `⏳ Sedang membuat stiker${".".repeat(frame + 1)}`, edit: placeholder.key }).catch(() => {});
       }, THINK_ANIMATION_MS);
       timer.unref?.();
 
@@ -431,19 +430,16 @@ export default async function axynityPlugin({ sock, message, media, log }) {
       if (imgBuffer) {
         const webpBuffer = await convertImageToWebp(imgBuffer);
 
-        // Kirim stiker terlebih dahulu
         await sock.sendMessage(jid, { sticker: webpBuffer }, { quoted: message });
         await sock.sendMessage(jid, { react: { text: "🔥", key: message.key } }).catch(() => {});
 
-        // Hapus pending state
         delete session.pendingImageB64;
         delete session.awaitingStickerConfirm;
         saveStore();
 
-        // AI Vision deteksi objek dan berikan ucapan balasan yang sangat ramah & heboh
         const b64Image = imgBuffer.toString("base64");
         const promptContent = [
-          { type: "text", text: "Stiker dari gambar ini baru saja selesai kamu buat. Berikan pesan santai, hangat, dan antusias (1-2 kalimat lengkap dengan emoji lucu seperti ✨, 🎉, 🐱) untuk memberi tahu user bahwa stikernya sudah siap, contohnya: 'Horeee! Stickernya udah selesai dibuat nih! Gambar [sebutkan objek/hewan di gambar] nya gemes banget deh ✨... Selamat memakai ya! 😊'" },
+          { type: "text", text: "Stiker dari gambar ini baru saja berhasil dibuat. Berikan pesan santai singkat 1 kalimat (contoh: 'Stickernya udah jadi nih! Gambar [sebutkan objek] 👍...')." },
           { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64Image}` } }
         ];
 
@@ -457,11 +453,10 @@ export default async function axynityPlugin({ sock, message, media, log }) {
 
         stopAnim();
 
-        // Edit teks placeholder langsung menjadi ucapan ramah dari AI
         if (aiResponse && placeholder?.key) {
           await sock.sendMessage(jid, { text: aiResponse, edit: placeholder.key }).catch(() => {});
         } else if (placeholder?.key) {
-          await sock.sendMessage(jid, { text: "Horeee! Stickernya udah selesai dibuat nih! ✨ Selamat memakai ya! 😊", edit: placeholder.key }).catch(() => {});
+          await sock.sendMessage(jid, { text: "Stickernya udah jadi nih! 👍", edit: placeholder.key }).catch(() => {});
         }
         return;
       } else {
@@ -472,7 +467,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
       delete session.pendingImageB64;
       delete session.awaitingStickerConfirm;
       saveStore();
-      const errText = `❌ Aduh, maaf ya gomen... Aku gagal buat stikernya nih 🥺: ${e.message}`;
+      const errText = `❌ Gagal buat stiker: ${e.message}`;
       if (placeholder?.key) {
         await sock.sendMessage(jid, { text: errText, edit: placeholder.key }).catch(() => {});
       } else {
@@ -482,7 +477,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
     }
   }
 
-  // 3. JIKA USER KIRIM GAMBAR BARU TANPA KATA "STICKER" -> SIMPAN PENDING IMAGE & TANYA MAU JADI STIKER DENGAN RAMAH
+  // 3. JIKA USER KIRIM GAMBAR TANPA CAPTION (TANYA SANTAI)
   if (hasImage && !isExplicitStickerCommand) {
     try {
       let targetMsg = message;
@@ -510,7 +505,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
         saveStore();
 
         const promptContent = [
-          { type: "text", text: "Lihat gambar ini. Sebutkan nama/objek utama di gambar ini secara singkat dalam 2-4 kata saja (contoh: 'kucing persia yang imut', 'pemadangan laut', 'anime cowok ganteng'). Jawab ringkas." },
+          { type: "text", text: "Lihat gambar ini. Sebutkan nama/objek utama di gambar ini secara singkat dalam 2-4 kata (contoh: 'kucing persia', 'pemandangan laut'). Jawab ringkas." },
           { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64Image}` } }
         ];
 
@@ -523,7 +518,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
         });
 
         const objectText = detectedObject ? detectedObject.trim() : "ini";
-        const questionText = `Waaah, foto ${objectText} ini keren dan gemes banget deh! ✨😍\n\nMau aku bantuin ubah jadi stiker WhatsApp lucu apa gimana nih? Kalo mau, tinggal bales 'iya' atau 'boleh' yaa! 🎨😊`;
+        const questionText = `Wih gambar ${objectText} nih! Mau aku jadiin stiker WhatsApp sekalian nggak? Kalo mau, tinggal bales 'iya' atau 'boleh' ya! 🎨👍`;
 
         await sock.sendMessage(jid, { text: questionText }, { quoted: message });
         return;
@@ -537,7 +532,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
 
   if (!hasImage && /^\.(?:new|reset|newchat|lupain)\s*$/i.test(raw)) {
     delete store.sessions[info.key]; store.sessions[info.key] = newSession(info); saveStore();
-    await sock.sendMessage(jid, { text: "🆕 Sesi percakapan baru udah dibuat nih! Yuk kita mulai ngobrol santai lagi 😊✨" }, { quoted: message }); return;
+    await sock.sendMessage(jid, { text: "🆕 Sesi obrolan baru udah dibuat. Yuk mulai lagi! 👍" }, { quoted: message }); return;
   }
 
   const cmd = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
@@ -546,15 +541,16 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   if (!hasImage && !cmd && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
   if (hasImage && !cmd && !raw && !autoReply) return;
 
+  // Reaksi santai (tanpa emoji love)
   if (/\b(terima kasih|makasih|thanks|thx)\b/i.test(lower)) {
-    await sock.sendMessage(jid, { react: { text: "❤️", key: message.key } }).catch(() => {});
+    await sock.sendMessage(jid, { react: { text: "👍", key: message.key } }).catch(() => {});
   } else if (/\b(keren|mantap|good|hebat|pro)\b/i.test(lower)) {
     await sock.sendMessage(jid, { react: { text: "🔥", key: message.key } }).catch(() => {});
   } else if (/\b(wkwk|hahaha|lol|lucu)\b/i.test(lower)) {
     await sock.sendMessage(jid, { react: { text: "😂", key: message.key } }).catch(() => {});
   }
 
-  const prompt = cmd ? cmd[1].trim() : (raw || "Tolong jelaskan gambar ini dengan detail dan ramah ya! 😊");
+  const prompt = cmd ? cmd[1].trim() : (raw || "Jelaskan gambar ini singkat dan jelas ya.");
 
   let userContent;
   try {
@@ -584,7 +580,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
 
   try {
     await sock.sendPresenceUpdate("composing", jid).catch(() => {});
-    const base = hasImage ? "🖼️ Axynity lagi merhatiin gambarnya" : "🧠 Axynity lagi mikirin jawabannya";
+    const base = hasImage ? "🖼️ Axynity sedang melihat gambar" : "🧠 Axynity sedang berpikir";
     placeholder = await sock.sendMessage(jid, { text: `${base}...` }, { quoted: message }).catch((e) => {
       log?.("ai_placeholder_error", { jid, error: e?.message });
       return null;
@@ -621,11 +617,11 @@ export default async function axynityPlugin({ sock, message, media, log }) {
     const err = e?.message || String(e);
     log?.("ai_error", { jid, identity: info.identity, sessionId: session.id, status: e?.status || null, code: e?.code || null, error: err, text: prompt, hasImage });
     console.error("[axynity-plugin]", err);
-    let friendly = "Aduh, Axynity lagi sedikit ada kendala teknis nih 🥺 Coba sapa lagi sebentar yaa!";
-    if (e?.code === "AXYNITY_GATEWAY_HTML") friendly = `Gateway Axynity lagi bermasalah nih (HTTP ${e.status || "?"}) 😅 Coba lagi sebentar ya!`;
-    else if (e?.status === 403 || err.includes("403")) friendly = "Request Axynity ditolak nih (403) 😕 Tolong cek konfigurasi API/Cloudflare yaa!";
-    else if (!AXYNITY_API_KEY) friendly = "Waduh, API key bot belum dikonfigurasi dengan benar nih 😅 Hubungi admin yaa!";
-    else if (/timed out|abort/i.test(err)) friendly = hasImage ? "Analisis gambarnya agak kelamaan nih 😅 Coba kirim lagi atau pakai gambar yang lebih kecil yaa!" : "Axynity kelamaan mikir nih 🥺 Coba tanyakan lagi yaa!";
+    let friendly = "Axynity lagi ada kendala sebentar, coba lagi nanti ya!";
+    if (e?.code === "AXYNITY_GATEWAY_HTML") friendly = `Gateway Axynity lagi bermasalah (HTTP ${e.status || "?"}). Coba lagi nanti!`;
+    else if (e?.status === 403 || err.includes("403")) friendly = "Request Axynity ditolak (403). Cek API key atau Cloudflare.";
+    else if (!AXYNITY_API_KEY) friendly = "API key bot belum di-set. Hubungi admin ya.";
+    else if (/timed out|abort/i.test(err)) friendly = hasImage ? "Analisis gambar kelamaan, coba pakai gambar yang lebih kecil." : "Axynity kelamaan merespons, coba lagi ya.";
 
     let sent = false;
     if (placeholder?.key && socketAlive) {
