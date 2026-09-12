@@ -324,15 +324,11 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   const hasImage = hasDirectImage || hasQuotedImage || media?.type === "image";
   const hasSticker = Boolean(message?.message?.stickerMessage);
 
-  // 1. FITUR KOMENTAR STIKER SPONTAN + REACTION OTOMATIS
   if (hasSticker) {
     try {
-      // AI memberikan reaction emoji acak/keren ke stiker
       const emojis = ["😂", "🔥", "👍", "🗿", "💀", "❤️", "✨"];
       const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
-      await sock.sendMessage(jid, {
-        react: { text: randomEmoji, key: message.key }
-      }).catch(() => {});
+      await sock.sendMessage(jid, { react: { text: randomEmoji, key: message.key } }).catch(() => {});
 
       const stickerBuffer = await downloadWhatsAppMedia(message, "buffer");
       if (stickerBuffer) {
@@ -365,11 +361,12 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   const cmd = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
   const autoReply = String(process.env.WA_AI_AUTO_REPLY || "true").toLowerCase() !== "false";
 
-  // 2. FITUR UBAH FOTO KE STIKER + REACTION KETIKA BERHASIL
   const isStickerCommand = hasImage && /\b(sticker|stiker)\b/i.test(raw);
   if (isStickerCommand) {
+    let placeholder = null;
     try {
-      await sock.sendMessage(jid, { text: "⏳ Sedang membuat stiker..." }, { quoted: message });
+      placeholder = await sock.sendMessage(jid, { text: "⏳ Sedang membuat stiker..." }, { quoted: message }).catch(() => null);
+
       let targetMsg = message;
       if (hasQuotedImage) {
         const ctx = message.message.extendedTextMessage.contextInfo;
@@ -378,15 +375,33 @@ export default async function axynityPlugin({ sock, message, media, log }) {
           message: ctx.quotedMessage
         };
       }
-      const imgBuffer = await downloadWhatsAppMedia(targetMsg, "buffer");
+      
+      let imgBuffer = await downloadWhatsAppMedia(targetMsg, "buffer");
+      if (!imgBuffer && media?.path && fs.existsSync(media.path)) {
+        imgBuffer = fs.readFileSync(media.path);
+      }
+      if (!imgBuffer && Buffer.isBuffer(media?.buffer)) {
+        imgBuffer = media.buffer;
+      }
+
       if (imgBuffer) {
-        await sock.sendMessage(jid, { sticker: imgBuffer }, { quoted: message });
-        // Beri reaction jempol/api pada pesan request stiker user
+        if (placeholder?.key) {
+          await sock.sendMessage(jid, { sticker: imgBuffer, edit: placeholder.key });
+        } else {
+          await sock.sendMessage(jid, { sticker: imgBuffer }, { quoted: message });
+        }
         await sock.sendMessage(jid, { react: { text: "🔥", key: message.key } }).catch(() => {});
         return;
+      } else {
+        throw new Error("Buffer gambar kosong atau gagal diunduh.");
       }
     } catch (e) {
-      await sock.sendMessage(jid, { text: `❌ Gagal membuat stiker: ${e.message}` }, { quoted: message });
+      const errText = `❌ Gagal membuat stiker: ${e.message}`;
+      if (placeholder?.key) {
+        await sock.sendMessage(jid, { text: errText, edit: placeholder.key }).catch(() => {});
+      } else {
+        await sock.sendMessage(jid, { text: errText }, { quoted: message }).catch(() => {});
+      }
       return;
     }
   }
@@ -394,7 +409,6 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   if (!hasImage && !cmd && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
   if (hasImage && !cmd && !raw && !autoReply) return;
 
-  // 3. FITUR REACTION PADA KONDISI TERTENTU (Misal: User bilang thanks/terima kasih, puji bot, atau salam)
   if (/\b(terima kasih|makasih|thanks|thx)\b/i.test(lower)) {
     await sock.sendMessage(jid, { react: { text: "❤️", key: message.key } }).catch(() => {});
   } else if (/\b(keren|mantap|good|hebat|pro)\b/i.test(lower)) {
