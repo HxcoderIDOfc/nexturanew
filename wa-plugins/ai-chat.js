@@ -24,23 +24,29 @@ const TEXT_TIMEOUT_MS = Number(process.env.AXYNITY_TIMEOUT_MS || 120000);
 const IMAGE_TIMEOUT_MS = Number(process.env.AXYNITY_IMAGE_TIMEOUT_MS || 180000);
 
 const AXYNITY_API_KEY = String(process.env.AXYNITY_API_KEY || "").trim();
+const OWNER_JID = String(process.env.OWNER_JID || "").trim();
+
 if (!AXYNITY_API_KEY) {
   console.error("[axynity-plugin] FATAL: AXYNITY_API_KEY belum di-set di environment.");
 }
 
-// System Prompt: Santai, asyik, panjang sedang, tanpa emoji love/lebay
 const SYSTEM_PROMPT = {
   role: "system",
   content: "Kamu adalah Axynity, AI WhatsApp yang asyik, santai, dan friendly! Berikan jawaban yang jelas, informatif, dengan panjang yang sedang (pas, tidak terlalu panjang bertele-tele dan tidak terlalu singkat). Gunakan bahasa santai sehari-hari seperti teman ngobrol di WhatsApp. Gunakan emoji yang pas dan santai (seperti 👍, 🔥, 😂, ✨, 😎, 🗿), hindari emoji romantis atau berlebihan (seperti 💖, 😘, ❤️, 🥺). Tetap responsif, asyik, dan seru!"
 };
 
-function emptyStore() { return { version: 1, aliases: {}, sessions: {} }; }
+function emptyStore() { return { version: 1, aliases: {}, sessions: {}, registeredLids: [] }; }
 function loadStore() {
   try {
     fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
     if (!fs.existsSync(MEMORY_FILE)) return emptyStore();
     const x = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8"));
-    return { version: 1, aliases: x?.aliases || {}, sessions: x?.sessions || {} };
+    return {
+      version: 1,
+      aliases: x?.aliases || {},
+      sessions: x?.sessions || {},
+      registeredLids: Array.isArray(x?.registeredLids) ? x.registeredLids : []
+    };
   } catch (e) {
     console.error("[axynity-memory] gagal membaca:", e.message);
     return emptyStore();
@@ -368,6 +374,20 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   const info = getIdentity(message);
   const session = getSession(info);
 
+  // DETEKSI LID BARU DAN KIRIM NOTIFIKASI KE NOMOR WA DIRI SENDIRI / OWNER
+  if (isLid(info.identity) && !store.registeredLids.includes(info.identity)) {
+    store.registeredLids.push(info.identity);
+    saveStore();
+
+    const selfJid = OWNER_JID || (sock?.user?.id ? sock.user.id.split(":")[0] + "@s.whatsapp.net" : null);
+    if (selfJid) {
+      const notifyText = `🔔 *User Baru (LID) Terdeteksi!*\n\n• *LID User:* ${info.identity}\n• *Chat JID:* ${jid}\n• *Pesan Awal:* "${raw || "[Media]"}"`;
+      await sock.sendMessage(selfJid, { text: notifyText }).catch((err) => {
+        log?.("notify_self_error", { error: err.message });
+      });
+    }
+  }
+
   // 1. FITUR KOMENTAR STIKER SPONTAN (Santai & Asyik)
   if (hasSticker) {
     try {
@@ -541,7 +561,6 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   if (!hasImage && !cmd && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
   if (hasImage && !cmd && !raw && !autoReply) return;
 
-  // Reaksi santai (tanpa emoji love)
   if (/\b(terima kasih|makasih|thanks|thx)\b/i.test(lower)) {
     await sock.sendMessage(jid, { react: { text: "👍", key: message.key } }).catch(() => {});
   } else if (/\b(keren|mantap|good|hebat|pro)\b/i.test(lower)) {
