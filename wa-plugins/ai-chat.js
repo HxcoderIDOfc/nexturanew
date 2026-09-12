@@ -31,7 +31,7 @@ function getContextInfo(m) {
 const MAX_TURNS = Math.max(2, Number(process.env.AXYNITY_MEMORY_TURNS || 20));
 const STREAM_EDIT_MS = Math.max(700, Number(process.env.AXYNITY_STREAM_EDIT_MS || 1200));
 const THINK_ANIMATION_MS = Math.max(700, Number(process.env.AXYNITY_THINK_ANIMATION_MS || 900));
-const MAX_IMAGE_BYTES = Math.max(256000, Number(process.env.AXYNITY_MAX_IMAGE_BYTES || 8 * 1024 * 1024));
+const MAX_IMAGE_BYTES = Math.max(256000, Number(process.env.AXYNITY_MAX_IMAGE_BYTES || 15 * 1024 * 1024));
 const SESSION_DIR = path.resolve(process.env.WA_SESSION_DIR || "/tmp/axynera-wa-session");
 const MEMORY_FILE = path.resolve(process.env.AXYNITY_MEMORY_FILE || path.join(SESSION_DIR, "axynity-memory.json"));
 
@@ -47,7 +47,7 @@ if (!AXYNITY_API_KEY) {
 
 const SYSTEM_PROMPT = {
   role: "system",
-  content: "Kamu adalah Axynity, AI WhatsApp yang asyik, santai, dan friendly! Berikan jawaban yang jelas, informatif, dengan panjang yang sedang (pas, tidak terlalu panjang bertele-tele dan tidak terlalu singkat). Gunakan bahasa santai sehari-hari seperti teman ngobrol di WhatsApp. Gunakan emoji yang pas dan santai (seperti 👍, 🔥, 😂, ✨, 😎, 🗿), hindari emoji romantis atau berlebihan (seperti 💖, 😘, ❤️, 🥺). Tetap responsif, asyik, dan seru!"
+  content: "Kamu adalah Axynity, AI WhatsApp yang asyik, santai, dan friendly! Berikan jawaban yang jelas, informatif, dengan panjang yang sedang (pas, tidak terlalu panjang bertele-tele dan tidak terlalu singkat). Gunakan bahasa santai sehari-hari seperti teman ngobrol di WhatsApp. Gunakan emoji yang pas dan santai (seperti 👍, 🔥, 😂, ✨, 😎, 🗿, 😢, 😡, 😲), hindari emoji romantis atau berlebihan (seperti 💖, 😘, ❤️, 🥺). Tetap responsif, asyik, dan seru!"
 };
 
 function emptyStore() { return { version: 1, aliases: {}, sessions: {}, registeredLids: [] }; }
@@ -160,19 +160,19 @@ function stripHiddenReasoning(v = "") {
   return t.trim();
 }
 
-async function convertImageToWebp(buffer) {
-  try {
-    const sharp = (await import("sharp")).default;
-    return await sharp(buffer)
-      .resize(512, 512, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
-      .webp({ quality: 80 })
-      .toBuffer();
-  } catch {
+// Konversi Gambar/GIF/Video ke WebP Sticker (Mendukung Stiker Gerak/Animated)
+async function convertMediaToWebp(buffer, isAnimated = false) {
+  if (isAnimated) {
     try {
       return await new Promise((resolve, reject) => {
         const ff = spawn("ffmpeg", [
           "-i", "pipe:0",
-          "-vf", "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
+          "-vf", "scale=512:512:force_original_aspect_ratio=decrease,fps=12,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
+          "-loop", "0",
+          "-preset", "default",
+          "-an",
+          "-vsync", "0",
+          "-fs", "900000",
           "-f", "webp",
           "pipe:1"
         ]);
@@ -180,15 +180,82 @@ async function convertImageToWebp(buffer) {
         ff.stdout.on("data", (chunk) => chunks.push(chunk));
         ff.on("close", (code) => {
           if (code === 0 && chunks.length) resolve(Buffer.concat(chunks));
-          else reject(new Error("FFmpeg error"));
+          else reject(new Error("FFmpeg animated sticker conversion failed"));
         });
         ff.on("error", reject);
         ff.stdin.write(buffer);
         ff.stdin.end();
       });
     } catch {
-      return buffer;
+      // Fallback jika animasi gagal
     }
+  }
+
+  try {
+    const sharp = (await import("sharp")).default;
+    return await sharp(buffer)
+      .resize(512, 512, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .webp({ quality: 80 })
+      .toBuffer();
+  } catch {
+    return new Promise((resolve, reject) => {
+      const ff = spawn("ffmpeg", [
+        "-i", "pipe:0",
+        "-vf", "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
+        "-f", "webp",
+        "pipe:1"
+      ]);
+      const chunks = [];
+      ff.stdout.on("data", (chunk) => chunks.push(chunk));
+      ff.on("close", (code) => {
+        if (code === 0 && chunks.length) resolve(Buffer.concat(chunks));
+        else reject(new Error("FFmpeg error"));
+      });
+      ff.on("error", reject);
+      ff.stdin.write(buffer);
+      ff.stdin.end();
+    });
+  }
+}
+
+// EKSTRAKSI BEBERAPA FRAME (MULTI-FRAME) AGAR AI BISA DETEKSI GERAKAN
+async function extractMultiFramesForAi(buffer, count = 3) {
+  try {
+    return await new Promise((resolve) => {
+      const ff = spawn("ffmpeg", [
+        "-i", "pipe:0",
+        "-vf", `fps=2,scale=320:320:force_original_aspect_ratio=decrease`,
+        "-vframes", String(count),
+        "-f", "image2pipe",
+        "-c:v", "mjpeg",
+        "pipe:1"
+      ]);
+      const chunks = [];
+      ff.stdout.on("data", (chunk) => chunks.push(chunk));
+      ff.on("close", (code) => {
+        if (code === 0 && chunks.length) {
+          const fullBuf = Buffer.concat(chunks);
+          const frames = [];
+          let start = 0;
+          while (start < fullBuf.length) {
+            const soi = fullBuf.indexOf(Buffer.from([0xff, 0xd8]), start);
+            if (soi === -1) break;
+            const eoi = fullBuf.indexOf(Buffer.from([0xff, 0xd9]), soi + 2);
+            if (eoi === -1) break;
+            frames.push(fullBuf.subarray(soi, eoi + 2));
+            start = eoi + 2;
+          }
+          resolve(frames.length > 0 ? frames.slice(0, count) : [buffer]);
+        } else {
+          resolve([buffer]);
+        }
+      });
+      ff.on("error", () => resolve([buffer]));
+      ff.stdin.write(buffer);
+      ff.stdin.end();
+    });
+  } catch {
+    return [buffer];
   }
 }
 
@@ -208,55 +275,52 @@ async function downloadWhatsAppMedia(targetMsg, mediaType = "buffer") {
   }
 }
 
-async function downloadWhatsAppImage(message, media) {
+async function downloadWhatsAppMediaFrames(message, media) {
+  let rawBuffer = null;
   if (media?.path && fs.existsSync(media.path)) {
-    const stat = fs.statSync(media.path);
-    if (stat.size > MAX_IMAGE_BYTES) throw new Error(`Gambar terlalu besar (${Math.ceil(stat.size / 1024 / 1024)} MB). Maksimal ${Math.floor(MAX_IMAGE_BYTES / 1024 / 1024)} MB.`);
-    return fs.readFileSync(media.path).toString("base64");
-  }
+    rawBuffer = fs.readFileSync(media.path);
+  } else if (Buffer.isBuffer(media?.buffer)) {
+    rawBuffer = media.buffer;
+  } else {
+    const ctx = getContextInfo(message);
+    const isDirectMedia = Boolean(message?.message?.imageMessage || message?.message?.videoMessage || message?.message?.stickerMessage);
+    const isQuotedMedia = Boolean(ctx?.quotedMessage?.imageMessage || ctx?.quotedMessage?.videoMessage || ctx?.quotedMessage?.stickerMessage || ctx?.quotedMessage?.viewOnceMessage?.message?.imageMessage);
 
-  if (Buffer.isBuffer(media?.buffer)) {
-    if (media.buffer.length > MAX_IMAGE_BYTES) throw new Error(`Gambar terlalu besar. Maksimal ${Math.floor(MAX_IMAGE_BYTES / 1024 / 1024)} MB.`);
-    return media.buffer.toString("base64");
-  }
-
-  const isDirectImage = Boolean(message?.message?.imageMessage);
-  const ctx = getContextInfo(message);
-  const isQuotedImage = Boolean(ctx?.quotedMessage?.imageMessage || ctx?.quotedMessage?.viewOnceMessage?.message?.imageMessage);
-
-  if (isDirectImage || isQuotedImage) {
-    let targetMsg = message;
-    if (isQuotedImage && ctx?.stanzaId) {
-      targetMsg = {
-        key: {
-          remoteJid: message.key.remoteJid,
-          id: ctx.stanzaId,
-          participant: ctx.participant || ctx.remoteJid
-        },
-        message: ctx.quotedMessage
-      };
-    }
-    const buffer = await downloadWhatsAppMedia(targetMsg, "buffer");
-    if (buffer) {
-      if (buffer.length > MAX_IMAGE_BYTES) throw new Error("Ukuran gambar melebihi batas maksimum.");
-      return buffer.toString("base64");
+    if (isDirectMedia || isQuotedMedia) {
+      let targetMsg = message;
+      if (isQuotedMedia && ctx?.stanzaId) {
+        targetMsg = {
+          key: {
+            remoteJid: message.key.remoteJid,
+            id: ctx.stanzaId,
+            participant: ctx.participant || ctx.remoteJid
+          },
+          message: ctx.quotedMessage
+        };
+      }
+      rawBuffer = await downloadWhatsAppMedia(targetMsg, "buffer");
     }
   }
 
-  return null;
+  if (!rawBuffer) return null;
+  const frames = await extractMultiFramesForAi(rawBuffer, 3);
+  return frames.map(f => f.toString("base64"));
 }
 
 async function buildUserContent(prompt, message, media) {
-  const text = String(prompt || "").trim() || "Jelaskan gambar ini singkat dan jelas ya.";
-  const b64Image = await downloadWhatsAppImage(message, media);
+  const text = String(prompt || "").trim() || "Jelaskan media ini singkat dan jelas ya.";
+  const b64Frames = await downloadWhatsAppMediaFrames(message, media);
 
-  if (!b64Image) return text;
+  if (!b64Frames || !b64Frames.length) return text;
 
-  const mimetype = media?.mimetype || message?.message?.imageMessage?.mimetype || "image/jpeg";
-  return [
-    { type: "text", text },
-    { type: "image_url", image_url: { url: `data:${mimetype};base64,${b64Image}` } }
-  ];
+  const content = [{ type: "text", text }];
+  for (const b64 of b64Frames) {
+    content.push({
+      type: "image_url",
+      image_url: { url: `data:image/jpeg;base64,${b64}` }
+    });
+  }
+  return content;
 }
 
 function headers(apiKey, stream) {
@@ -382,24 +446,51 @@ export default async function axynityPlugin({ sock, message, media, log }) {
 
   const ctx = getContextInfo(message);
   const quotedMsg = ctx?.quotedMessage;
+
   const hasDirectImage = Boolean(message?.message?.imageMessage);
+  const hasDirectVideo = Boolean(message?.message?.videoMessage);
   const hasQuotedImage = Boolean(quotedMsg?.imageMessage || quotedMsg?.viewOnceMessage?.message?.imageMessage);
-  const hasImage = hasDirectImage || hasQuotedImage || media?.type === "image";
+  const hasQuotedVideo = Boolean(quotedMsg?.videoMessage);
+  const hasImage = hasDirectImage || hasQuotedImage || hasDirectVideo || hasQuotedVideo || media?.type === "image" || media?.type === "video";
   const hasSticker = Boolean(message?.message?.stickerMessage);
+
+  const isAnimatedMedia = Boolean(
+    hasDirectVideo ||
+    hasQuotedVideo ||
+    message?.message?.videoMessage?.gifPlayback ||
+    quotedMsg?.videoMessage?.gifPlayback ||
+    message?.message?.stickerMessage?.isAnimated ||
+    quotedMsg?.stickerMessage?.isAnimated
+  );
 
   const lower = raw.toLowerCase();
   const info = getIdentity(message);
   const session = getSession(info);
 
-  // Expire pending image after 10 minutes to prevent using stale images
   if (session?.pendingImageTimestamp && Date.now() - session.pendingImageTimestamp > 10 * 60 * 1000) {
     delete session.pendingImageB64;
+    delete session.pendingIsAnimated;
     delete session.awaitingStickerConfirm;
     delete session.pendingImageTimestamp;
     saveStore();
   }
 
-  // DETEKSI LID BARU DAN KIRIM NOTIFIKASI KE NOMOR WA DIRI SENDIRI / OWNER
+  // REAKSI EMOSI DINAMIS (SMART SENTIMENT REACTION)
+  if (/\b(sedih|nangis|kecewa|gagal|sakit|patah hati|galau|duka)\b/i.test(lower)) {
+    await sock.sendMessage(jid, { react: { text: "😢", key: message.key } }).catch(() => {});
+  } else if (/\b(marah|kesel|benci|anjing|babi|kontol|tai|bangsat|goblok|emosi)\b/i.test(lower)) {
+    await sock.sendMessage(jid, { react: { text: "😡", key: message.key } }).catch(() => {});
+  } else if (/\b(kaget|anjir|astaga|woy|serius|demi apa|anjay)\b/i.test(lower)) {
+    await sock.sendMessage(jid, { react: { text: "😲", key: message.key } }).catch(() => {});
+  } else if (/\b(wkwk|hahaha|lol|lucu|ngakak|gokil)\b/i.test(lower)) {
+    await sock.sendMessage(jid, { react: { text: "😂", key: message.key } }).catch(() => {});
+  } else if (/\b(keren|mantap|good|hebat|pro|solusi|juara)\b/i.test(lower)) {
+    await sock.sendMessage(jid, { react: { text: "🔥", key: message.key } }).catch(() => {});
+  } else if (/\b(terima kasih|makasih|thanks|thx|tq)\b/i.test(lower)) {
+    await sock.sendMessage(jid, { react: { text: "👍", key: message.key } }).catch(() => {});
+  }
+
+  // DETEKSI LID BARU DAN NOTIFIKASI OWNER
   if (isLid(info.identity) && !store.registeredLids.includes(info.identity)) {
     store.registeredLids.push(info.identity);
     saveStore();
@@ -413,16 +504,12 @@ export default async function axynityPlugin({ sock, message, media, log }) {
     }
   }
 
-  // 1. FITUR KOMENTAR STIKER SPONTAN (DENGAN PLACEHOLDER ANIMASI & EDIT TEKS)
+  // 1. FITUR KOMENTAR STIKER SPONTAN (MULTI-FRAME DETEKSI GERAKAN)
   if (hasSticker) {
     let placeholder = null, frame = 0, timer = null;
     const stopAnim = () => { if (timer) clearInterval(timer); timer = null; };
 
     try {
-      const emojis = ["😂", "🔥", "👍", "🗿", "💀", "✨"];
-      const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
-      await sock.sendMessage(jid, { react: { text: randomEmoji, key: message.key } }).catch(() => {});
-
       placeholder = await sock.sendMessage(jid, { text: "🖼️ Axynity mendeteksi stiker..." }, { quoted: message }).catch(() => null);
 
       timer = setInterval(() => {
@@ -434,11 +521,18 @@ export default async function axynityPlugin({ sock, message, media, log }) {
 
       const stickerBuffer = await downloadWhatsAppMedia(message, "buffer");
       if (stickerBuffer) {
-        const b64Sticker = stickerBuffer.toString("base64");
+        const frames = await extractMultiFramesForAi(stickerBuffer, 3);
         const stickerContent = [
-          { type: "text", text: "User mengirim stiker ini di chat. Berikan komentar singkat dan santai (1 kalimat singkat seperti: 'Mantap stickernya, gambar [objek]... 😎'). Sampaikan dengan santai layaknya teman." },
-          { type: "image_url", image_url: { url: `data:image/webp;base64,${b64Sticker}` } }
+          { type: "text", text: "User mengirim stiker ini di chat. Amati beberapa frame gerakan stiker ini. Berikan komentar singkat dan santai (1 kalimat seperti: 'Mantap stickernya, gerakan [objek]... 😎'). Sampaikan dengan santai layaknya teman." }
         ];
+
+        for (const f of frames) {
+          stickerContent.push({
+            type: "image_url",
+            image_url: { url: `data:image/jpeg;base64,${f.toString("base64")}` }
+          });
+        }
+
         const commentMessages = [{ role: "user", content: stickerContent }];
         const comment = await askAxynityStream({ messages: commentMessages, log, jid, sessionId: "sticker-comment", hasImage: true });
 
@@ -465,14 +559,13 @@ export default async function axynityPlugin({ sock, message, media, log }) {
     return;
   }
 
-  // 2. DETEKSI BUAT STIKER
+  // 2. DETEKSI BUAT STIKER (MEDIA MASUK CHAT DULU BARU REVIEW AI)
   const isExplicitStickerCommand = (hasImage && /\b(sticker|stiker)\b/i.test(raw)) || (hasQuotedImage && /\b(sticker|stiker)\b/i.test(raw));
   const isConfirmPattern = /^(?:iya|ya|boleh|mau|ok|yep|gas|bikin|jadikan|silahkan|acc|pikirin|stiker|sticker)\b/i.test(lower) || /\b(jadikan stiker|bikin stiker|buat stiker)\b/i.test(lower);
   const hasPendingSticker = Boolean(session?.awaitingStickerConfirm && session?.pendingImageB64);
 
-  // Jika user minta buat stiker tapi tidak ada gambar sama sekali
   if (/\b(jadikan stiker|bikin stiker|buat stiker)\b/i.test(lower) && !hasImage && !hasPendingSticker) {
-    await sock.sendMessage(jid, { text: "Mana gambarnya nih? Kirim gambarnya dulu atau reply (balas) foto yang mau dijadikan stiker dengan ketik 'stiker' ya! 🎨👍" }, { quoted: message });
+    await sock.sendMessage(jid, { text: "Mana gambarnya nih? Kirim gambar/GIF/video dulu atau reply (balas) medianya dengan ketik 'stiker' ya! 🎨👍" }, { quoted: message });
     return;
   }
 
@@ -490,13 +583,12 @@ export default async function axynityPlugin({ sock, message, media, log }) {
       }, THINK_ANIMATION_MS);
       timer.unref?.();
 
-      let imgBuffer = null;
-      // PRIORITAS 1: Foto langsung di pesan baru
-      if (hasDirectImage || media?.type === "image") {
-        imgBuffer = await downloadWhatsAppMedia(message, "buffer");
-      }
-      // PRIORITAS 2: Foto yang di-reply/quoted oleh user
-      else if (hasQuotedImage && ctx?.stanzaId) {
+      let mediaBuffer = null;
+      let shouldAnimate = isAnimatedMedia;
+
+      if (hasDirectImage || hasDirectVideo || media?.type === "image" || media?.type === "video") {
+        mediaBuffer = await downloadWhatsAppMedia(message, "buffer");
+      } else if ((hasQuotedImage || hasQuotedVideo) && ctx?.stanzaId) {
         const targetMsg = {
           key: {
             remoteJid: message.key.remoteJid,
@@ -505,29 +597,37 @@ export default async function axynityPlugin({ sock, message, media, log }) {
           },
           message: quotedMsg
         };
-        imgBuffer = await downloadWhatsAppMedia(targetMsg, "buffer");
-      }
-      // PRIORITAS 3: Foto dari tawaran konfirmasi sebelumnya
-      else if (session?.pendingImageB64) {
-        imgBuffer = Buffer.from(session.pendingImageB64, "base64");
+        mediaBuffer = await downloadWhatsAppMedia(targetMsg, "buffer");
+      } else if (session?.pendingImageB64) {
+        mediaBuffer = Buffer.from(session.pendingImageB64, "base64");
+        shouldAnimate = Boolean(session.pendingIsAnimated);
       }
 
-      if (imgBuffer) {
-        const webpBuffer = await convertImageToWebp(imgBuffer);
+      if (mediaBuffer) {
+        const webpBuffer = await convertMediaToWebp(mediaBuffer, shouldAnimate);
 
+        // SEND STICKER FIRST INTO CHAT ROOM
         await sock.sendMessage(jid, { sticker: webpBuffer }, { quoted: message });
         await sock.sendMessage(jid, { react: { text: "🔥", key: message.key } }).catch(() => {});
 
         delete session.pendingImageB64;
+        delete session.pendingIsAnimated;
         delete session.awaitingStickerConfirm;
         delete session.pendingImageTimestamp;
         saveStore();
 
-        const b64Image = imgBuffer.toString("base64");
+        // MULTI-FRAME REVIEW FOR AI
+        const frames = await extractMultiFramesForAi(mediaBuffer, 3);
         const promptContent = [
-          { type: "text", text: "Stiker dari gambar ini baru saja berhasil dibuat. Berikan pesan santai singkat 1 kalimat (contoh: 'Stickernya udah jadi nih! Gambar [sebutkan objek] 👍...')." },
-          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64Image}` } }
+          { type: "text", text: "Stiker dari media ini baru saja berhasil kamu buat dan dikirim ke room chat. Amati beberapa frame gerakan ini dan berikan pesan santai singkat 1 kalimat (contoh: 'Stickernya udah jadi nih! Gambar/gerakan [sebutkan objek] 👍...')." }
         ];
+
+        for (const f of frames) {
+          promptContent.push({
+            type: "image_url",
+            image_url: { url: `data:image/jpeg;base64,${f.toString("base64")}` }
+          });
+        }
 
         const aiResponse = await askAxynityStream({
           messages: [{ role: "user", content: promptContent }],
@@ -546,11 +646,12 @@ export default async function axynityPlugin({ sock, message, media, log }) {
         }
         return;
       } else {
-        throw new Error("Buffer gambar tidak ditemukan.");
+        throw new Error("Buffer media tidak ditemukan.");
       }
     } catch (e) {
       stopAnim();
       delete session.pendingImageB64;
+      delete session.pendingIsAnimated;
       delete session.awaitingStickerConfirm;
       delete session.pendingImageTimestamp;
       saveStore();
@@ -564,50 +665,48 @@ export default async function axynityPlugin({ sock, message, media, log }) {
     }
   }
 
-  // 3. JIKA USER KIRIM GAMBAR TANPA CAPTION (DENGAN PLACEHOLDER ANIMASI & EDIT TEKS)
-  if (hasImage && !isExplicitStickerCommand) {
+  // 3. GAMBAR/GIF/VIDEO TANPA TEKS -> DETEKSI MULTI-FRAME & TANYA STIKER
+  if ((hasDirectImage || hasDirectVideo) && !raw && !isExplicitStickerCommand) {
     let placeholder = null, frame = 0, timer = null;
     const stopAnim = () => { if (timer) clearInterval(timer); timer = null; };
 
     try {
-      placeholder = await sock.sendMessage(jid, { text: "🖼️ Axynity mendeteksi gambar..." }, { quoted: message }).catch(() => null);
+      placeholder = await sock.sendMessage(jid, { text: "🖼️ Axynity mendeteksi media..." }, { quoted: message }).catch(() => null);
 
       timer = setInterval(() => {
         if (!placeholder?.key) return;
         frame = (frame + 1) % 3;
-        void sock.sendMessage(jid, { text: `🖼️ Axynity mendeteksi gambar${".".repeat(frame + 1)}`, edit: placeholder.key }).catch(() => {});
+        void sock.sendMessage(jid, { text: `🖼️ Axynity mendeteksi media${".".repeat(frame + 1)}`, edit: placeholder.key }).catch(() => {});
       }, THINK_ANIMATION_MS);
       timer.unref?.();
 
-      let targetMsg = message;
-      if (hasQuotedImage && ctx?.stanzaId) {
-        targetMsg = {
-          key: { remoteJid: message.key.remoteJid, id: ctx.stanzaId, participant: ctx.participant || ctx.remoteJid },
-          message: quotedMsg
-        };
+      let mediaBuffer = await downloadWhatsAppMedia(message, "buffer");
+      if (!mediaBuffer && media?.path && fs.existsSync(media.path)) {
+        mediaBuffer = fs.readFileSync(media.path);
+      }
+      if (!mediaBuffer && Buffer.isBuffer(media?.buffer)) {
+        mediaBuffer = media.buffer;
       }
 
-      let imgBuffer = await downloadWhatsAppMedia(targetMsg, "buffer");
-      if (!imgBuffer && media?.path && fs.existsSync(media.path)) {
-        imgBuffer = fs.readFileSync(media.path);
-      }
-      if (!imgBuffer && Buffer.isBuffer(media?.buffer)) {
-        imgBuffer = media.buffer;
-      }
+      if (mediaBuffer) {
+        const frames = await extractMultiFramesForAi(mediaBuffer, 3);
 
-      if (imgBuffer) {
-        const b64Image = imgBuffer.toString("base64");
-
-        // Simpan gambar baru & perbarui timestamp
-        session.pendingImageB64 = b64Image;
+        session.pendingImageB64 = mediaBuffer.toString("base64");
+        session.pendingIsAnimated = isAnimatedMedia;
         session.pendingImageTimestamp = Date.now();
         session.awaitingStickerConfirm = true;
         saveStore();
 
         const promptContent = [
-          { type: "text", text: "Lihat gambar ini. Sebutkan nama/objek utama di gambar ini secara singkat dalam 2-4 kata (contoh: 'kucing persia', 'pemandangan laut'). Jawab ringkas." },
-          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64Image}` } }
+          { type: "text", text: "Lihat media ini dari beberapa frame berikut. Sebutkan nama/objek utama atau gerakan di media ini secara singkat dalam 2-4 kata (contoh: 'kucing persia', 'gif anime joget'). Jawab ringkas." }
         ];
+
+        for (const f of frames) {
+          promptContent.push({
+            type: "image_url",
+            image_url: { url: `data:image/jpeg;base64,${f.toString("base64")}` }
+          });
+        }
 
         const detectedObject = await askAxynityStream({
           messages: [{ role: "user", content: promptContent }],
@@ -620,7 +719,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
         stopAnim();
 
         const objectText = detectedObject ? detectedObject.trim() : "ini";
-        const questionText = `Wih gambar ${objectText} nih! Mau aku jadiin stiker WhatsApp sekalian nggak? Kalo mau, tinggal bales 'iya' atau 'boleh' ya! 🎨👍`;
+        const questionText = `Wih media ${objectText} nih! Mau aku jadiin stiker WhatsApp sekalian nggak? Kalo mau, tinggal bales 'iya' atau 'boleh' ya! 🎨👍`;
 
         if (placeholder?.key) {
           await sock.sendMessage(jid, { text: questionText, edit: placeholder.key }).catch(() => {});
@@ -631,14 +730,14 @@ export default async function axynityPlugin({ sock, message, media, log }) {
       } else {
         stopAnim();
         if (placeholder?.key) {
-          await sock.sendMessage(jid, { text: "Gagal membaca gambarnya nih 😅", edit: placeholder.key }).catch(() => {});
+          await sock.sendMessage(jid, { text: "Gagal membaca medianya nih 😅", edit: placeholder.key }).catch(() => {});
         }
       }
     } catch (e) {
       stopAnim();
       log?.("image_detect_error", { error: e.message });
       if (placeholder?.key) {
-        await sock.sendMessage(jid, { text: "Gagal mendeteksi gambarnya nih 😅", edit: placeholder.key }).catch(() => {});
+        await sock.sendMessage(jid, { text: "Gagal mendeteksi medianya nih 😅", edit: placeholder.key }).catch(() => {});
       }
     }
   }
@@ -656,15 +755,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   if (!hasImage && !cmd && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
   if (hasImage && !cmd && !raw && !autoReply) return;
 
-  if (/\b(terima kasih|makasih|thanks|thx)\b/i.test(lower)) {
-    await sock.sendMessage(jid, { react: { text: "👍", key: message.key } }).catch(() => {});
-  } else if (/\b(keren|mantap|good|hebat|pro)\b/i.test(lower)) {
-    await sock.sendMessage(jid, { react: { text: "🔥", key: message.key } }).catch(() => {});
-  } else if (/\b(wkwk|hahaha|lol|lucu)\b/i.test(lower)) {
-    await sock.sendMessage(jid, { react: { text: "😂", key: message.key } }).catch(() => {});
-  }
-
-  const prompt = cmd ? cmd[1].trim() : (raw || "Jelaskan gambar ini singkat dan jelas ya.");
+  const prompt = cmd ? cmd[1].trim() : (raw || "Jelaskan media ini singkat dan jelas ya.");
 
   let userContent;
   try {
@@ -694,7 +785,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
 
   try {
     await sock.sendPresenceUpdate("composing", jid).catch(() => {});
-    const base = hasImage ? "🖼️ Axynity sedang melihat gambar" : "🧠 Axynity sedang berpikir";
+    const base = hasImage ? "🖼️ Axynity sedang melihat media" : "🧠 Axynity sedang berpikir";
     placeholder = await sock.sendMessage(jid, { text: `${base}...` }, { quoted: message }).catch((e) => {
       log?.("ai_placeholder_error", { jid, error: e?.message });
       return null;
@@ -724,7 +815,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
     const rendered = await render(answer, true);
     if (!rendered) throw new Error("Jawaban Axynity diterima, tetapi gagal dikirim ke WhatsApp (koneksi mungkin terputus).");
 
-    session.messages = trimMessages([...(session.messages || []), { role: "user", content: Array.isArray(userContent) ? `[Gambar] ${prompt}` : prompt }, { role: "assistant", content: answer }]);
+    session.messages = trimMessages([...(session.messages || []), { role: "user", content: Array.isArray(userContent) ? `[Media] ${prompt}` : prompt }, { role: "assistant", content: answer }]);
     session.updatedAt = Date.now(); session.chatJids = [...new Set([...(session.chatJids || []), jid, info.identity].filter(Boolean))]; saveStore();
   } catch (e) {
     stopAnim();
@@ -735,7 +826,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
     if (e?.code === "AXYNITY_GATEWAY_HTML") friendly = `Gateway Axynity lagi bermasalah (HTTP ${e.status || "?"}). Coba lagi nanti!`;
     else if (e?.status === 403 || err.includes("403")) friendly = "Request Axynity ditolak (403). Cek API key atau Cloudflare.";
     else if (!AXYNITY_API_KEY) friendly = "API key bot belum di-set. Hubungi admin ya.";
-    else if (/timed out|abort/i.test(err)) friendly = hasImage ? "Analisis gambar kelamaan, coba pakai gambar yang lebih kecil." : "Axynity kelamaan merespons, coba lagi ya.";
+    else if (/timed out|abort/i.test(err)) friendly = hasImage ? "Analisis media kelamaan, coba pakai file yang lebih kecil." : "Axynity kelamaan merespons, coba lagi ya.";
 
     let sent = false;
     if (placeholder?.key && socketAlive) {
