@@ -13,6 +13,21 @@ function getText(m) {
   );
 }
 
+function getContextInfo(m) {
+  const msg = m?.message;
+  if (!msg) return null;
+  return (
+    msg.extendedTextMessage?.contextInfo ||
+    msg.imageMessage?.contextInfo ||
+    msg.stickerMessage?.contextInfo ||
+    msg.videoMessage?.contextInfo ||
+    msg.documentMessage?.contextInfo ||
+    msg.viewOnceMessage?.message?.imageMessage?.contextInfo ||
+    msg.viewOnceMessageV2?.message?.imageMessage?.contextInfo ||
+    null
+  );
+}
+
 const MAX_TURNS = Math.max(2, Number(process.env.AXYNITY_MEMORY_TURNS || 20));
 const STREAM_EDIT_MS = Math.max(700, Number(process.env.AXYNITY_STREAM_EDIT_MS || 1200));
 const THINK_ANIMATION_MS = Math.max(700, Number(process.env.AXYNITY_THINK_ANIMATION_MS || 900));
@@ -206,17 +221,17 @@ async function downloadWhatsAppImage(message, media) {
   }
 
   const isDirectImage = Boolean(message?.message?.imageMessage);
-  const isQuotedImage = Boolean(message?.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage);
+  const ctx = getContextInfo(message);
+  const isQuotedImage = Boolean(ctx?.quotedMessage?.imageMessage || ctx?.quotedMessage?.viewOnceMessage?.message?.imageMessage);
 
   if (isDirectImage || isQuotedImage) {
     let targetMsg = message;
-    if (isQuotedImage) {
-      const ctx = message.message.extendedTextMessage.contextInfo;
+    if (isQuotedImage && ctx?.stanzaId) {
       targetMsg = {
         key: {
           remoteJid: message.key.remoteJid,
           id: ctx.stanzaId,
-          participant: ctx.participant
+          participant: ctx.participant || ctx.remoteJid
         },
         message: ctx.quotedMessage
       };
@@ -365,14 +380,24 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   if (!jid || message?.key?.fromMe || jid === "status@broadcast") return;
   const raw = String(getText(message)).trim();
 
+  const ctx = getContextInfo(message);
+  const quotedMsg = ctx?.quotedMessage;
   const hasDirectImage = Boolean(message?.message?.imageMessage);
-  const hasQuotedImage = Boolean(message?.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage);
+  const hasQuotedImage = Boolean(quotedMsg?.imageMessage || quotedMsg?.viewOnceMessage?.message?.imageMessage);
   const hasImage = hasDirectImage || hasQuotedImage || media?.type === "image";
   const hasSticker = Boolean(message?.message?.stickerMessage);
 
   const lower = raw.toLowerCase();
   const info = getIdentity(message);
   const session = getSession(info);
+
+  // Expire pending image after 10 minutes to prevent using stale images
+  if (session?.pendingImageTimestamp && Date.now() - session.pendingImageTimestamp > 10 * 60 * 1000) {
+    delete session.pendingImageB64;
+    delete session.awaitingStickerConfirm;
+    delete session.pendingImageTimestamp;
+    saveStore();
+  }
 
   // DETEKSI LID BARU DAN KIRIM NOTIFIKASI KE NOMOR WA DIRI SENDIRI / OWNER
   if (isLid(info.identity) && !store.registeredLids.includes(info.identity)) {
@@ -445,6 +470,12 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   const isConfirmPattern = /^(?:iya|ya|boleh|mau|ok|yep|gas|bikin|jadikan|silahkan|acc|pikirin|stiker|sticker)\b/i.test(lower) || /\b(jadikan stiker|bikin stiker|buat stiker)\b/i.test(lower);
   const hasPendingSticker = Boolean(session?.awaitingStickerConfirm && session?.pendingImageB64);
 
+  // Jika user minta buat stiker tapi tidak ada gambar sama sekali
+  if (/\b(jadikan stiker|bikin stiker|buat stiker)\b/i.test(lower) && !hasImage && !hasPendingSticker) {
+    await sock.sendMessage(jid, { text: "Mana gambarnya nih? Kirim gambarnya dulu atau reply (balas) foto yang mau dijadikan stiker dengan ketik 'stiker' ya! 🎨👍" }, { quoted: message });
+    return;
+  }
+
   if (isExplicitStickerCommand || (hasPendingSticker && isConfirmPattern)) {
     let placeholder = null, frame = 0, timer = null;
     const stopAnim = () => { if (timer) clearInterval(timer); timer = null; };
@@ -460,17 +491,25 @@ export default async function axynityPlugin({ sock, message, media, log }) {
       timer.unref?.();
 
       let imgBuffer = null;
-      if (hasQuotedImage) {
-        const ctx = message.message.extendedTextMessage.contextInfo;
+      // PRIORITAS 1: Foto langsung di pesan baru
+      if (hasDirectImage || media?.type === "image") {
+        imgBuffer = await downloadWhatsAppMedia(message, "buffer");
+      }
+      // PRIORITAS 2: Foto yang di-reply/quoted oleh user
+      else if (hasQuotedImage && ctx?.stanzaId) {
         const targetMsg = {
-          key: { remoteJid: message.key.remoteJid, id: ctx.stanzaId, participant: ctx.participant },
-          message: ctx.quotedMessage
+          key: {
+            remoteJid: message.key.remoteJid,
+            id: ctx.stanzaId,
+            participant: ctx.participant || ctx.remoteJid
+          },
+          message: quotedMsg
         };
         imgBuffer = await downloadWhatsAppMedia(targetMsg, "buffer");
-      } else if (session?.pendingImageB64) {
+      }
+      // PRIORITAS 3: Foto dari tawaran konfirmasi sebelumnya
+      else if (session?.pendingImageB64) {
         imgBuffer = Buffer.from(session.pendingImageB64, "base64");
-      } else if (hasImage) {
-        imgBuffer = await downloadWhatsAppMedia(message, "buffer");
       }
 
       if (imgBuffer) {
@@ -481,6 +520,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
 
         delete session.pendingImageB64;
         delete session.awaitingStickerConfirm;
+        delete session.pendingImageTimestamp;
         saveStore();
 
         const b64Image = imgBuffer.toString("base64");
@@ -512,6 +552,7 @@ export default async function axynityPlugin({ sock, message, media, log }) {
       stopAnim();
       delete session.pendingImageB64;
       delete session.awaitingStickerConfirm;
+      delete session.pendingImageTimestamp;
       saveStore();
       const errText = `❌ Gagal buat stiker: ${e.message}`;
       if (placeholder?.key) {
@@ -539,11 +580,10 @@ export default async function axynityPlugin({ sock, message, media, log }) {
       timer.unref?.();
 
       let targetMsg = message;
-      if (hasQuotedImage) {
-        const ctx = message.message.extendedTextMessage.contextInfo;
+      if (hasQuotedImage && ctx?.stanzaId) {
         targetMsg = {
-          key: { remoteJid: message.key.remoteJid, id: ctx.stanzaId, participant: ctx.participant },
-          message: ctx.quotedMessage
+          key: { remoteJid: message.key.remoteJid, id: ctx.stanzaId, participant: ctx.participant || ctx.remoteJid },
+          message: quotedMsg
         };
       }
 
@@ -558,7 +598,9 @@ export default async function axynityPlugin({ sock, message, media, log }) {
       if (imgBuffer) {
         const b64Image = imgBuffer.toString("base64");
 
+        // Simpan gambar baru & perbarui timestamp
         session.pendingImageB64 = b64Image;
+        session.pendingImageTimestamp = Date.now();
         session.awaitingStickerConfirm = true;
         saveStore();
 
