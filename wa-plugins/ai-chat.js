@@ -357,6 +357,10 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   const hasImage = hasDirectImage || hasQuotedImage || media?.type === "image";
   const hasSticker = Boolean(message?.message?.stickerMessage);
 
+  const lower = raw.toLowerCase();
+  const info = getIdentity(message);
+  const session = getSession(info);
+
   // 1. FITUR KOMENTAR STIKER SPONTAN KETIKA ORANG KIRIM STIKER TIBA-TIBA
   if (hasSticker) {
     try {
@@ -383,58 +387,46 @@ export default async function axynityPlugin({ sock, message, media, log }) {
     return;
   }
 
-  if (!raw && !hasImage) return;
+  // 2. DETEKSI USER KONFIRMASI (Mendukung "iya", "ya", "boleh", "mau", "jadikan stiker", dll tanpa perlu quoted reply)
+  const isConfirmPattern = /^(?:iya|ya|boleh|mau|ok|yep|gas|bikin|jadikan|silahkan|acc|pikirin|stiker|sticker)\b/i.test(lower) || /\b(jadikan stiker|bikin stiker|buat stiker)\b/i.test(lower);
+  const hasPendingSticker = Boolean(session?.awaitingStickerConfirm && session?.pendingImageB64);
 
-  const lower = raw.toLowerCase(); const info = getIdentity(message); const session = getSession(info);
-  
-  if (!hasImage && /^\.(?:new|reset|newchat|lupain)\s*$/i.test(raw)) {
-    delete store.sessions[info.key]; store.sessions[info.key] = newSession(info); saveStore();
-    await sock.sendMessage(jid, { text: "🆕 Sesi Axynity baru dibuat." }, { quoted: message }); return;
-  }
-
-  const cmd = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
-  const autoReply = String(process.env.WA_AI_AUTO_REPLY || "true").toLowerCase() !== "false";
-
-  // 2. FITUR UBAH GAMBAR KE STIKER + AI DETEKSI ISI GAMBAR DAN BERI PESAN TERTULIS
-  const isStickerCommand = hasImage && /\b(sticker|stiker)\b/i.test(raw);
-  if (isStickerCommand) {
+  if ((hasPendingSticker && isConfirmPattern) || (hasQuotedImage && /\b(sticker|stiker)\b/i.test(raw))) {
     let placeholder = null;
     try {
       placeholder = await sock.sendMessage(jid, { text: "⏳ Sedang membuat stiker..." }, { quoted: message }).catch(() => null);
 
-      let targetMsg = message;
+      let imgBuffer = null;
       if (hasQuotedImage) {
         const ctx = message.message.extendedTextMessage.contextInfo;
-        targetMsg = {
+        const targetMsg = {
           key: { remoteJid: message.key.remoteJid, id: ctx.stanzaId, participant: ctx.participant },
           message: ctx.quotedMessage
         };
-      }
-      
-      let imgBuffer = await downloadWhatsAppMedia(targetMsg, "buffer");
-      if (!imgBuffer && media?.path && fs.existsSync(media.path)) {
-        imgBuffer = fs.readFileSync(media.path);
-      }
-      if (!imgBuffer && Buffer.isBuffer(media?.buffer)) {
-        imgBuffer = media.buffer;
+        imgBuffer = await downloadWhatsAppMedia(targetMsg, "buffer");
+      } else if (session?.pendingImageB64) {
+        imgBuffer = Buffer.from(session.pendingImageB64, "base64");
       }
 
       if (imgBuffer) {
         const webpBuffer = await convertImageToWebp(imgBuffer);
 
-        // Hapus pesan placeholder teks agar tidak menumpuk
         if (placeholder?.key) {
           await sock.sendMessage(jid, { delete: placeholder.key }).catch(() => {});
         }
 
-        // Kirim stiker terlebih dahulu
         const sentSticker = await sock.sendMessage(jid, { sticker: webpBuffer }, { quoted: message });
         await sock.sendMessage(jid, { react: { text: "🔥", key: message.key } }).catch(() => {});
 
-        // AI Vision mendeteksi objek gambar lalu beri respon balasan khusus
+        // Hapus pending image state setelah stiker berhasil dibuat
+        delete session.pendingImageB64;
+        delete session.awaitingStickerConfirm;
+        saveStore();
+
+        // AI berikan pesan balasan setelah stiker jadi
         const b64Image = imgBuffer.toString("base64");
         const promptContent = [
-          { type: "text", text: "Stiker dari gambar ini baru saja berhasil dibuat. Berikan pesan santai 1 kalimat sederhana untuk memberi tahu user, contohnya: 'Stickernya udah jadi nih! Gambar [sebutkan objek/hewan/ekspresi di gambar]...' " },
+          { type: "text", text: "Stiker dari gambar ini baru saja berhasil dibuat. Berikan pesan santai 1 kalimat sederhana untuk memberi tahu user bahwa stikernya sudah jadi, contohnya: 'Stickernya udah jadi nih! Gambar [sebutkan objek/hewan di gambar]...' " },
           { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64Image}` } }
         ];
 
@@ -451,9 +443,12 @@ export default async function axynityPlugin({ sock, message, media, log }) {
         }
         return;
       } else {
-        throw new Error("Buffer gambar kosong atau gagal diunduh.");
+        throw new Error("Buffer gambar tidak ditemukan.");
       }
     } catch (e) {
+      delete session.pendingImageB64;
+      delete session.awaitingStickerConfirm;
+      saveStore();
       const errText = `❌ Gagal membuat stiker: ${e.message}`;
       if (placeholder?.key) {
         await sock.sendMessage(jid, { text: errText, edit: placeholder.key }).catch(() => {});
@@ -463,6 +458,70 @@ export default async function axynityPlugin({ sock, message, media, log }) {
       return;
     }
   }
+
+  // 3. JIKA USER KIRIM GAMBAR BARU TANPA KATA "STICKER" -> SIMPAN PENDING IMAGE & TANYA MAU JADI STIKER
+  const isExplicitStickerRequest = hasImage && /\b(sticker|stiker)\b/i.test(raw);
+  if (hasImage && !isExplicitStickerRequest) {
+    try {
+      let targetMsg = message;
+      if (hasQuotedImage) {
+        const ctx = message.message.extendedTextMessage.contextInfo;
+        targetMsg = {
+          key: { remoteJid: message.key.remoteJid, id: ctx.stanzaId, participant: ctx.participant },
+          message: ctx.quotedMessage
+        };
+      }
+
+      let imgBuffer = await downloadWhatsAppMedia(targetMsg, "buffer");
+      if (!imgBuffer && media?.path && fs.existsSync(media.path)) {
+        imgBuffer = fs.readFileSync(media.path);
+      }
+      if (!imgBuffer && Buffer.isBuffer(media?.buffer)) {
+        imgBuffer = media.buffer;
+      }
+
+      if (imgBuffer) {
+        const b64Image = imgBuffer.toString("base64");
+
+        // Simpan gambar ke sesi chat
+        session.pendingImageB64 = b64Image;
+        session.awaitingStickerConfirm = true;
+        saveStore();
+
+        // AI Vision mendeteksi objek gambar secara singkat
+        const promptContent = [
+          { type: "text", text: "Lihat gambar ini. Sebutkan nama/objek utama di gambar ini secara singkat dalam 2-4 kata saja (contoh: 'kucing persia yang imut', 'pemadangan laut', 'anime cowok'). Jawab ringkas." },
+          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64Image}` } }
+        ];
+
+        const detectedObject = await askAxynityStream({
+          messages: [{ role: "user", content: promptContent }],
+          log,
+          jid,
+          sessionId: "image-detect",
+          hasImage: true
+        });
+
+        const objectText = detectedObject ? detectedObject.trim() : "ini";
+        const questionText = `Wahh gambar ${objectText}! Mau aku jadikan sticker apa gimana? 🎨`;
+
+        await sock.sendMessage(jid, { text: questionText }, { quoted: message });
+        return;
+      }
+    } catch (e) {
+      log?.("image_detect_error", { error: e.message });
+    }
+  }
+
+  if (!raw && !hasImage) return;
+
+  if (!hasImage && /^\.(?:new|reset|newchat|lupain)\s*$/i.test(raw)) {
+    delete store.sessions[info.key]; store.sessions[info.key] = newSession(info); saveStore();
+    await sock.sendMessage(jid, { text: "🆕 Sesi Axynity baru dibuat." }, { quoted: message }); return;
+  }
+
+  const cmd = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
+  const autoReply = String(process.env.WA_AI_AUTO_REPLY || "true").toLowerCase() !== "false";
 
   if (!hasImage && !cmd && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
   if (hasImage && !cmd && !raw && !autoReply) return;
