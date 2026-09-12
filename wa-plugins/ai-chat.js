@@ -132,6 +132,22 @@ function stripHiddenReasoning(v = "") {
   return t.trim();
 }
 
+async function downloadWhatsAppMedia(targetMsg, mediaType = "buffer") {
+  try {
+    let downloadMediaMessage;
+    try {
+      const baileys = await import("@whiskeysockets/baileys");
+      downloadMediaMessage = baileys.downloadMediaMessage;
+    } catch {
+      const baileys = await import("@adiwajshing/baileys");
+      downloadMediaMessage = baileys.downloadMediaMessage;
+    }
+    return await downloadMediaMessage(targetMsg, mediaType, {});
+  } catch (err) {
+    throw new Error(`Gagal mengunduh media WhatsApp: ${err.message}`);
+  }
+}
+
 async function downloadWhatsAppImage(message, media) {
   if (media?.path && fs.existsSync(media.path)) {
     const stat = fs.statSync(media.path);
@@ -148,37 +164,22 @@ async function downloadWhatsAppImage(message, media) {
   const isQuotedImage = Boolean(message?.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage);
 
   if (isDirectImage || isQuotedImage) {
-    try {
-      let downloadMediaMessage;
-      try {
-        const baileys = await import("@whiskeysockets/baileys");
-        downloadMediaMessage = baileys.downloadMediaMessage;
-      } catch {
-        const baileys = await import("@adiwajshing/baileys");
-        downloadMediaMessage = baileys.downloadMediaMessage;
-      }
-
-      let targetMsg = message;
-      if (isQuotedImage) {
-        const ctx = message.message.extendedTextMessage.contextInfo;
-        targetMsg = {
-          key: {
-            remoteJid: message.key.remoteJid,
-            id: ctx.stanzaId,
-            participant: ctx.participant
-          },
-          message: ctx.quotedMessage
-        };
-      }
-
-      const buffer = await downloadMediaMessage(targetMsg, "buffer", {});
-      if (buffer) {
-        if (buffer.length > MAX_IMAGE_BYTES) throw new Error("Ukuran gambar melebihi batas maksimum.");
-        return buffer.toString("base64");
-      }
-    } catch (err) {
-      console.error("[axynity-media] Gagal mengunduh gambar:", err.message);
-      throw new Error(`Gagal mengunduh gambar dari WhatsApp: ${err.message}`);
+    let targetMsg = message;
+    if (isQuotedImage) {
+      const ctx = message.message.extendedTextMessage.contextInfo;
+      targetMsg = {
+        key: {
+          remoteJid: message.key.remoteJid,
+          id: ctx.stanzaId,
+          participant: ctx.participant
+        },
+        message: ctx.quotedMessage
+      };
+    }
+    const buffer = await downloadWhatsAppMedia(targetMsg, "buffer");
+    if (buffer) {
+      if (buffer.length > MAX_IMAGE_BYTES) throw new Error("Ukuran gambar melebihi batas maksimum.");
+      return buffer.toString("base64");
     }
   }
 
@@ -321,6 +322,36 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   const hasDirectImage = Boolean(message?.message?.imageMessage);
   const hasQuotedImage = Boolean(message?.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage);
   const hasImage = hasDirectImage || hasQuotedImage || media?.type === "image";
+  const hasSticker = Boolean(message?.message?.stickerMessage);
+
+  // 1. FITUR KOMENTAR STIKER SPONTAN + REACTION OTOMATIS
+  if (hasSticker) {
+    try {
+      // AI memberikan reaction emoji acak/keren ke stiker
+      const emojis = ["😂", "🔥", "👍", "🗿", "💀", "❤️", "✨"];
+      const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
+      await sock.sendMessage(jid, {
+        react: { text: randomEmoji, key: message.key }
+      }).catch(() => {});
+
+      const stickerBuffer = await downloadWhatsAppMedia(message, "buffer");
+      if (stickerBuffer) {
+        const b64Sticker = stickerBuffer.toString("base64");
+        const stickerContent = [
+          { type: "text", text: "User mengirim stiker ini secara tiba-tiba. Berikan komentar singkat, santai, lucu, atau respons yang asyik tentang stiker ini layaknya teman ngobrol di WhatsApp." },
+          { type: "image_url", image_url: { url: `data:image/webp;base64,${b64Sticker}` } }
+        ];
+        const commentMessages = [{ role: "user", content: stickerContent }];
+        const comment = await askAxynityStream({ messages: commentMessages, log, jid, sessionId: "sticker-comment", hasImage: true });
+        if (comment) {
+          await sock.sendMessage(jid, { text: comment }, { quoted: message });
+        }
+      }
+    } catch (e) {
+      log?.("sticker_comment_error", { error: e.message });
+    }
+    return;
+  }
 
   if (!raw && !hasImage) return;
 
@@ -334,8 +365,43 @@ export default async function axynityPlugin({ sock, message, media, log }) {
   const cmd = raw.match(/^(?:\.ai|ai)\s+([\s\S]+)/i);
   const autoReply = String(process.env.WA_AI_AUTO_REPLY || "true").toLowerCase() !== "false";
 
+  // 2. FITUR UBAH FOTO KE STIKER + REACTION KETIKA BERHASIL
+  const isStickerCommand = hasImage && /\b(sticker|stiker)\b/i.test(raw);
+  if (isStickerCommand) {
+    try {
+      await sock.sendMessage(jid, { text: "⏳ Sedang membuat stiker..." }, { quoted: message });
+      let targetMsg = message;
+      if (hasQuotedImage) {
+        const ctx = message.message.extendedTextMessage.contextInfo;
+        targetMsg = {
+          key: { remoteJid: message.key.remoteJid, id: ctx.stanzaId, participant: ctx.participant },
+          message: ctx.quotedMessage
+        };
+      }
+      const imgBuffer = await downloadWhatsAppMedia(targetMsg, "buffer");
+      if (imgBuffer) {
+        await sock.sendMessage(jid, { sticker: imgBuffer }, { quoted: message });
+        // Beri reaction jempol/api pada pesan request stiker user
+        await sock.sendMessage(jid, { react: { text: "🔥", key: message.key } }).catch(() => {});
+        return;
+      }
+    } catch (e) {
+      await sock.sendMessage(jid, { text: `❌ Gagal membuat stiker: ${e.message}` }, { quoted: message });
+      return;
+    }
+  }
+
   if (!hasImage && !cmd && (!autoReply || lower === "ping" || raw.startsWith("."))) return;
   if (hasImage && !cmd && !raw && !autoReply) return;
+
+  // 3. FITUR REACTION PADA KONDISI TERTENTU (Misal: User bilang thanks/terima kasih, puji bot, atau salam)
+  if (/\b(terima kasih|makasih|thanks|thx)\b/i.test(lower)) {
+    await sock.sendMessage(jid, { react: { text: "❤️", key: message.key } }).catch(() => {});
+  } else if (/\b(keren|mantap|good|hebat|pro)\b/i.test(lower)) {
+    await sock.sendMessage(jid, { react: { text: "🔥", key: message.key } }).catch(() => {});
+  } else if (/\b(wkwk|hahaha|lol|lucu)\b/i.test(lower)) {
+    await sock.sendMessage(jid, { react: { text: "😂", key: message.key } }).catch(() => {});
+  }
 
   const prompt = cmd ? cmd[1].trim() : (raw || "Jelaskan gambar ini.");
 
